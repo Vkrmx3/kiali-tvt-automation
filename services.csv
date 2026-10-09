@@ -1,0 +1,4 @@
+serviceName,namespace,workload,enabled
+kafka-ui,kafka,kafka-ui,true
+anz-account-management-service-v1,backoffice,anz-account-management-service-v1,true
+anz-adapter-service-v1,backoffice,anz-adapter-service-v1,true

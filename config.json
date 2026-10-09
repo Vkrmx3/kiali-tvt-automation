@@ -1,0 +1,12 @@
+{
+  "environment": "Production",
+  "kialiBaseUrl": "https://kiali.prd.ausiex.com.au/kiali/console",
+  "overviewDurationSeconds": 300,
+  "logsDurationSeconds": 900,
+  "pageTimeoutMilliseconds": 90000,
+  "renderWaitMilliseconds": 5000,
+  "viewportWidth": 1920,
+  "viewportHeight": 1080,
+  "deviceScaleFactor": 1,
+  "defaultHeadless": true
+}
