@@ -22,6 +22,16 @@ export async function createRunTempDirectory(tempRoot: string, release: string):
   }
 }
 
+export async function captureAuthenticationCheck(page: Page, config: AppConfig, directory: string): Promise<void> {
+  const bytes = await page.screenshot({
+    type: 'png', fullPage: false, timeout: Math.min(config.pageTimeoutMilliseconds, 10000),
+    mask: [page.locator('form, input, textarea, [contenteditable="true"], [role="textbox"], img, canvas, svg')],
+    maskColor: '#000000',
+  });
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  await writeFile(path.join(directory, 'authentication-check.png'), bytes, { mode: 0o600 });
+}
+
 export async function captureScreenshot(page: Page, config: AppConfig, destination: string, kind: 'overview' | 'logs' | 'error', verify: () => Promise<void>): Promise<string[]> {
   await verify();
   let navigated = false;

@@ -1,5 +1,5 @@
 import type { BrowserContext, Locator, Page, Request, Response } from 'playwright';
-import { AuthenticationError, TvtError } from './logger.js';
+import { AuthenticationError, TvtError, logDiagnosticUrl } from './logger.js';
 import type { AppConfig, Service } from './types.js';
 
 export type KialiTab = 'info' | 'logs';
@@ -20,36 +20,54 @@ async function visible(locator: Locator): Promise<boolean> {
   return locator.filter({ visible: true }).first().isVisible().catch(() => false);
 }
 
-async function visibleOutsideLogs(locator: Locator): Promise<boolean> {
-  for (const candidate of await locator.filter({ visible: true }).all()) {
-    if (await candidate.evaluate((element, selector) => !element.closest(selector), LOG_AREA_SELECTOR)) return true;
+export function isAuthenticationUrl(value: string, kialiBaseUrl: string): boolean {
+  let current: URL;
+  let base: URL;
+  try {
+    current = new URL(value);
+    base = new URL(kialiBaseUrl);
+  } catch {
+    return false;
   }
-  return false;
+  if (!['http:', 'https:'].includes(current.protocol)) return false;
+  const basePath = base.pathname.replace(/\/+$/, '');
+  const sameSite = current.origin === base.origin;
+  const relativePath = sameSite && current.pathname.startsWith(`${basePath}/`)
+    ? current.pathname.slice(basePath.length) : current.pathname;
+  if (sameSite && /^\/namespaces(?:\/|$)/i.test(relativePath)) return false;
+  const microsoftHosts = ['login.microsoftonline.com', 'login.microsoft.com', 'login.windows.net', 'login.live.com'];
+  if (microsoftHosts.includes(current.hostname) || current.hostname.endsWith('.b2clogin.com')) return true;
+  return /(?:^|\/)(?:login|sign-?in|oauth2?|openid(?:-connect)?|oidc|adfs|saml)(?:\/|$)/i.test(relativePath) ||
+    /^\/(?:auth\/)?authorize\/?$/i.test(relativePath);
 }
 
 export async function getAuthenticationError(page: Page, config: AppConfig): Promise<AuthenticationError | undefined> {
   if (page.isClosed()) return undefined;
-  const current = new URL(page.url());
-  const base = new URL(config.kialiBaseUrl);
-  if (current.protocol === 'about:') return undefined;
-  if (current.origin !== base.origin) return new AuthenticationError('Browser left the configured Kiali site, possibly for corporate sign-in. Run: npm run login');
-  if (/(?:^|\/)(?:login|sign-?in|oauth2?|authorize|saml|auth|callback)(?:\/|$)/i.test(current.pathname)) {
-    return new AuthenticationError('Browser redirected to a sign-in or authentication route. Run: npm run login');
+  if (isAuthenticationUrl(page.url(), config.kialiBaseUrl)) {
+    return new AuthenticationError('Browser redirected to a known sign-in URL. Run: npm run login');
   }
-  if (Array.from(current.searchParams.keys()).some((key) => /^(?:access_token|id_token|token|code|SAMLResponse)$/i.test(key))) {
-    return new AuthenticationError('Browser is on an authentication callback rather than a clean workload URL. Run: npm run login');
-  }
-  if (await visible(page.locator('input[type="password"], input[autocomplete="one-time-code"], input[name="token" i], textarea[name="token" i]'))) {
-    return new AuthenticationError('A sign-in credential field is visible instead of an authenticated Kiali view. Run: npm run login');
-  }
-  if (await visibleOutsideLogs(page.getByRole('heading', { name: /^(?:sign\s?in|log\s?in|authentication required|session expired)(?:\b|$)/i }))) {
-    return new AuthenticationError('A sign-in or session-expiry heading is visible outside the log content. Run: npm run login');
-  }
-  if (await visibleOutsideLogs(page.getByRole('button', { name: /^(?:sign\s?in|log\s?in|authenticate)(?:\b|$)/i }))) {
-    return new AuthenticationError('A sign-in button is visible outside the log content. Run: npm run login');
-  }
-  if (await visibleOutsideLogs(page.getByText(/^(?:your session has expired|authentication required|please log in|please sign in)[.!]?$/i))) {
-    return new AuthenticationError('Kiali displays an authentication-required notice outside the log content. Run: npm run login');
+  const passwordVisible = await page.locator('input[type="password"]').filter({ visible: true }).evaluateAll(
+    (elements, selector) => elements.some((element) => !element.closest(selector)), LOG_AREA_SELECTOR,
+  );
+  if (passwordVisible) return new AuthenticationError('A visible password input confirms a sign-in page. Run: npm run login');
+  const forms = await page.locator('form').filter({ visible: true }).evaluateAll(
+    (elements, selector) => elements.filter((element) => !element.closest(selector)).map((element) => ({
+      id: element.getAttribute('id') ?? '', name: element.getAttribute('name') ?? '',
+      testId: element.getAttribute('data-testid') ?? element.getAttribute('data-test') ?? '',
+      action: element.getAttribute('action') ?? '',
+    })), LOG_AREA_SELECTOR,
+  );
+  for (const form of forms) {
+    const loginAttributes = /(?:^|[-_])(?:login|signin|sign-in|sign_in)(?:form)?(?:$|[-_])/i;
+    let loginAction = false;
+    try {
+      loginAction = Boolean(form.action) && isAuthenticationUrl(new URL(form.action, page.url()).href, config.kialiBaseUrl);
+    } catch {
+      loginAction = false;
+    }
+    if ([form.id, form.name, form.testId].some((value) => loginAttributes.test(value)) || form.id === 'i0281' || loginAction) {
+      return new AuthenticationError('A visible login form confirms a sign-in page. Run: npm run login');
+    }
   }
   return undefined;
 }
@@ -63,17 +81,7 @@ export async function assertAuthenticated(page: Page, config: AppConfig): Promis
   if (error) throw error;
 }
 
-export function apiAuthenticationError(response: Response, config: AppConfig): AuthenticationError | undefined {
-  if (response.status() !== 401) return undefined;
-  const url = new URL(response.url());
-  if (url.origin !== new URL(config.kialiBaseUrl).origin || !url.pathname.includes('/api/')) return undefined;
-  const source = /\/(?:pods|workloads)\/[^/]+\/logs(?:\/|$)/i.test(url.pathname) ? 'Kiali pod logs API'
-    : /\/namespaces\/[^/]+\/workloads\/[^/]+\/?$/i.test(url.pathname) ? 'Kiali workload API' : 'Kiali API';
-  return new AuthenticationError(`${source} returned HTTP 401 (Unauthorized). Verify session validity and workload/pod-log access. Run: npm run login`);
-}
-
 interface PageSignals {
-  authenticationError: AuthenticationError | undefined;
   apiFailure: string | undefined;
   pendingLogs: Set<Request>;
   dispose: () => void;
@@ -81,7 +89,7 @@ interface PageSignals {
 
 function observeRequests(page: Page, config: AppConfig): PageSignals {
   const base = new URL(config.kialiBaseUrl);
-  const signals: PageSignals = { authenticationError: undefined, apiFailure: undefined, pendingLogs: new Set(), dispose: () => undefined };
+  const signals: PageSignals = { apiFailure: undefined, pendingLogs: new Set(), dispose: () => undefined };
   const relevant = (request: Request): 'logs' | 'workload' | undefined => {
     const url = new URL(request.url());
     if (url.origin !== base.origin || !url.pathname.includes('/api/')) return undefined;
@@ -99,9 +107,9 @@ function observeRequests(page: Page, config: AppConfig): PageSignals {
   };
   const onResponse = (response: Response): void => {
     const request = response.request();
-    signals.authenticationError ??= apiAuthenticationError(response, config);
-    if (relevant(request) && response.status() >= 400 && response.status() !== 401) {
-      signals.apiFailure = response.status() === 403 ? 'Access denied to workload data or logs.'
+    if (relevant(request) && response.status() >= 400) {
+      signals.apiFailure = response.status() === 401 ? 'Kiali data request returned HTTP 401; no login page was confirmed. Check workload/pod-log access.'
+        : response.status() === 403 ? 'Access denied to workload data or logs (HTTP 403).'
         : response.status() === 404 ? 'Workload or logs were not found.'
           : `Kiali data request failed with HTTP ${response.status()}.`;
     }
@@ -122,15 +130,13 @@ function observeRequests(page: Page, config: AppConfig): PageSignals {
 const pageFailure = /(?:workload.*not found|no workload found|could not fetch workload|unable to (?:load|fetch) workload|access denied|forbidden|not authorized|permission denied|something went wrong|internal server error|unexpected error|page not found)/i;
 
 async function assertHealthy(page: Page, config: AppConfig, signals?: PageSignals): Promise<void> {
-  if (signals?.authenticationError) throw signals.authenticationError;
   await assertAuthenticated(page, config);
   if (signals?.apiFailure) throw new TvtError('KIALI_API', signals.apiFailure);
   const errors = page.locator('[role="alert"], h1, h2, h3, h4, h5, [data-test="error-page"], [data-testid="error-page"]');
-  if (await visible(errors.filter({ hasText: pageFailure }))) {
+  if (await errors.filter({ hasText: pageFailure, visible: true }).evaluateAll(
+    (elements, selector) => elements.some((element) => !element.closest(selector)), LOG_AREA_SELECTOR,
+  )) {
     throw new TvtError('KIALI_PAGE', 'Kiali reports a missing workload, denied access, or a page error. Inspect the diagnostic screenshot when available.');
-  }
-  if (await visible(page.getByText(/^Failed to fetch workload logs:/i))) {
-    throw new TvtError('KIALI_LOGS', 'Kiali could not fetch workload logs. Check permissions and pod availability.');
   }
 }
 
@@ -174,10 +180,19 @@ async function logsVisible(page: Page): Promise<boolean> {
   return false;
 }
 
-async function waitUntil(page: Page, config: AppConfig, signals: PageSignals, condition: () => Promise<boolean>, message: string): Promise<void> {
+async function waitUntil(page: Page, config: AppConfig, signals: PageSignals, condition: () => Promise<boolean>, message: string, bootstrapUrl?: string): Promise<void> {
   const deadline = Date.now() + config.pageTimeoutMilliseconds;
+  const expected = bootstrapUrl ? new URL(bootstrapUrl) : undefined;
   do {
-    await assertHealthy(page, config, signals);
+    try {
+      await assertHealthy(page, config, signals);
+    } catch (error) {
+      const current = new URL(page.url());
+      if (!(error instanceof AuthenticationError) || !expected ||
+          current.origin !== expected.origin || current.pathname !== expected.pathname) throw error;
+      await page.waitForTimeout(150);
+      continue;
+    }
     if (await condition()) return;
     await page.waitForTimeout(150);
   } while (Date.now() < deadline);
@@ -258,20 +273,21 @@ export async function prepareWorkloadPage(page: Page, config: AppConfig, service
   page.setDefaultTimeout(config.pageTimeoutMilliseconds);
   try {
     let response;
+    const destination = workloadUrl(config, service, tab, logsDurationSeconds);
+    logDiagnosticUrl(destination, 'Target');
     try {
-      response = await page.goto(workloadUrl(config, service, tab, logsDurationSeconds), {
+      response = await page.goto(destination, {
         waitUntil: 'domcontentloaded', timeout: config.pageTimeoutMilliseconds,
       });
     } catch (error) {
       await assertAuthenticated(page, config);
       throw error;
     }
-    await assertAuthenticated(page, config);
-    if (response?.status() === 401) throw new AuthenticationError('Workload page navigation returned HTTP 401 (Unauthorized). Run: npm run login');
+    if (response?.status() === 401) throw new TvtError('HTTP_401', 'Workload page returned HTTP 401. A status code alone does not confirm a login page.');
     if (response?.status() === 403) throw new TvtError('ACCESS_DENIED', 'Access denied to the requested workload.');
     if (response?.status() === 404) throw new TvtError('NOT_FOUND', 'The requested workload page was not found.');
     if (response && response.status() >= 400) throw new TvtError('HTTP', `Kiali navigation failed with HTTP ${response.status()}.`);
-    await waitUntil(page, config, signals, async () => await workloadVisible(page, service) && await tabVisible(page, tab), 'Expected workload name or requested tab did not become visible.');
+    await waitUntil(page, config, signals, async () => await workloadVisible(page, service) && await tabVisible(page, tab), 'Expected workload name or requested tab did not become visible.', destination);
     const ready = async (): Promise<boolean> => !(await visible(loadingIndicators(page))) &&
       (tab !== 'logs' || signals.pendingLogs.size === 0 && await logsVisible(page));
     await waitUntil(page, config, signals, ready, tab === 'logs' ? 'The logs area never finished loading.' : 'Workload loading indicators did not disappear.');

@@ -19,6 +19,19 @@ export function consoleText(value: string): string {
   return value.replace(/[\x00-\x1f\x7f-\x9f]/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
+export function safeDiagnosticUrl(value: string): string {
+  try {
+    const url = new URL(value);
+    return ['http:', 'https:'].includes(url.protocol) ? `${url.origin}${url.pathname}` : '[non-HTTP page]';
+  } catch {
+    return '[invalid URL]';
+  }
+}
+
+export function logDiagnosticUrl(value: string, stage: 'Target' | 'Current' | 'Retry'): void {
+  console.log(`${stage} page: ${safeDiagnosticUrl(value)}`);
+}
+
 export function safeErrorMessage(error: unknown): string {
   if (error instanceof TvtError) return consoleText(error.message);
   if (error instanceof Error) {

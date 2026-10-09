@@ -3,8 +3,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createInterface } from 'node:readline/promises';
 import { stdin, stdout } from 'node:process';
 import { Command, CommanderError } from 'commander';
-import { chromium, type Browser, type BrowserContext } from 'playwright';
-import { saveSession } from './auth.js';
+import { openBrowserSession, saveAuthentication, type BrowserSession } from './auth.js';
 import { loadConfig } from './config.js';
 import { confirmKialiLoaded } from './kiali.js';
 import { TvtError, safeErrorMessage } from './logger.js';
@@ -12,31 +11,27 @@ import { TvtError, safeErrorMessage } from './logger.js';
 export async function login(settingsPath: string): Promise<void> {
   if (!stdin.isTTY) throw new TvtError('LOGIN', 'Run npm run login from an interactive terminal to confirm corporate authentication.');
   const config = await loadConfig(settingsPath);
-  let browser: Browser | undefined;
-  let context: BrowserContext | undefined;
+  const authDirectory = fileURLToPath(new URL('../auth', import.meta.url));
+  let session: BrowserSession | undefined;
   const terminal = createInterface({ input: stdin, output: stdout });
   const controller = new AbortController();
-  const interrupt = (): void => { controller.abort(); void browser?.close().catch(() => undefined); };
+  const interrupt = (): void => { controller.abort(); void session?.close().catch(() => undefined); };
   terminal.on('SIGINT', interrupt);
   process.once('SIGINT', interrupt);
   process.once('SIGTERM', interrupt);
   try {
-    browser = await chromium.launch({ headless: false });
-    context = await browser.newContext({
-      viewport: { width: config.viewportWidth, height: config.viewportHeight },
-      deviceScaleFactor: config.deviceScaleFactor,
-    });
-    const page = await context.newPage();
+    session = await openBrowserSession(config, authDirectory, { headless: false });
+    if (controller.signal.aborted) throw new TvtError('INTERRUPTED', 'Login was interrupted.');
+    const page = session.context.pages()[0] ?? await session.context.newPage();
     await page.goto(config.kialiBaseUrl, { waitUntil: 'domcontentloaded', timeout: config.pageTimeoutMilliseconds });
-    await terminal.question('Complete corporate authentication in Chromium, then press Enter here. Do not enter credentials in this terminal. ', { signal: controller.signal });
+    await terminal.question('Complete corporate authentication in the browser, then press Enter here. Do not enter credentials in this terminal. ', { signal: controller.signal });
     await confirmKialiLoaded(page, config);
-    await saveSession(context, fileURLToPath(new URL('../auth/kiali-session.json', import.meta.url)));
+    await saveAuthentication(session.context, config, authDirectory);
     console.log('Authentication session saved locally. You can now run npm run tvt.');
   } finally {
     terminal.off('SIGINT', interrupt);
     terminal.close();
-    await context?.close().catch(() => undefined);
-    await browser?.close().catch(() => undefined);
+    await session?.close().catch(() => undefined);
     process.off('SIGINT', interrupt);
     process.off('SIGTERM', interrupt);
   }
@@ -44,7 +39,7 @@ export async function login(settingsPath: string): Promise<void> {
 
 async function main(): Promise<void> {
   const command = new Command().name('login')
-    .description('Open Chromium for manual corporate authentication and save a local Playwright session.')
+    .description('Open the configured browser for manual corporate authentication and retain its dedicated local session.')
     .option('--settings <path>', 'application settings JSON path', 'config.json')
     .configureOutput({ writeErr: () => undefined }).exitOverride();
   try {

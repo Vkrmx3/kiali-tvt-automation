@@ -2,12 +2,11 @@ import { rm } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { Command, CommanderError } from 'commander';
-import { chromium, type Browser, type BrowserContext } from 'playwright';
-import { loadSession } from './auth.js';
+import { loadAuthentication, openBrowserSession, type BrowserSession } from './auth.js';
 import { collectServices } from './collect.js';
 import { loadConfig, parseMinutes } from './config.js';
 import { enableReadOnlyRequests } from './kiali.js';
-import { AuthenticationError, TvtError, consoleText, safeErrorMessage } from './logger.js';
+import { TvtError, consoleText, safeErrorMessage } from './logger.js';
 import { createSheetNames } from './naming.js';
 import { createServiceResult, resultCounts } from './results.js';
 import { createRunTempDirectory } from './screenshots.js';
@@ -23,7 +22,7 @@ export function parseRunOptions(argv: string[]): RunOptions {
     .description('Collect read-only Kiali Overview and Logs screenshots into a local Excel workbook.')
     .requiredOption('--release <name>', 'release label for the report')
     .option('--minutes <integer>', 'log period from 1 to 1440 minutes', parseMinutes)
-    .option('--headed', 'show the Chromium browser', false)
+    .option('--headed', 'show the configured browser', false)
     .option('--service <name>', 'process one exact, enabled serviceName')
     .option('--config <path>', 'service CSV path', 'services.csv')
     .option('--settings <path>', 'application settings JSON path', 'config.json')
@@ -62,33 +61,28 @@ export async function runTvt(options: RunOptions, rootDirectory = projectRoot): 
   const startedAt = new Date();
   const config = await loadConfig(path.resolve(rootDirectory, options.settingsPath));
   const services = await loadServices(path.resolve(rootDirectory, options.configPath), options.service);
-  const state = await loadSession(path.join(rootDirectory, 'auth', 'kiali-session.json'));
+  const authDirectory = path.join(rootDirectory, 'auth');
+  const state = await loadAuthentication(config, authDirectory);
   const logsDurationSeconds = options.minutes === undefined ? config.logsDurationSeconds : options.minutes * 60;
   const tempDirectory = await createRunTempDirectory(path.join(rootDirectory, 'temp'), options.release);
   const controller = new AbortController();
-  let browser: Browser | undefined;
-  let context: BrowserContext | undefined;
+  let session: BrowserSession | undefined;
   let results: ServiceResult[];
   const interrupt = (): void => {
     controller.abort();
-    void browser?.close().catch(() => undefined);
+    void session?.close().catch(() => undefined);
   };
   process.once('SIGINT', interrupt);
   process.once('SIGTERM', interrupt);
   try {
-    browser = await chromium.launch({ headless: options.headed ? false : config.defaultHeadless });
-    try {
-      context = await browser.newContext({
-        storageState: state,
-        viewport: { width: config.viewportWidth, height: config.viewportHeight },
-        deviceScaleFactor: config.deviceScaleFactor,
-        serviceWorkers: 'block',
-      });
-    } catch {
-      throw new AuthenticationError('Unable to restore browser authentication state. Run: npm run login');
-    }
-    await enableReadOnlyRequests(context);
-    results = await collectServices(context, services, config, tempDirectory, logsDurationSeconds, controller.signal);
+    session = await openBrowserSession(config, authDirectory, {
+      headless: options.headed ? false : config.defaultHeadless,
+      readOnly: true,
+      storageState: state,
+    });
+    if (controller.signal.aborted) throw new TvtError('INTERRUPTED', 'Run was interrupted.');
+    await enableReadOnlyRequests(session.context);
+    results = await collectServices(session.context, services, config, tempDirectory, logsDurationSeconds, controller.signal);
   } catch (error) {
     const names = createSheetNames(services.map((service) => service.serviceName));
     results = services.map((service, index) => {
@@ -97,8 +91,7 @@ export async function runTvt(options: RunOptions, rootDirectory = projectRoot): 
       return result;
     });
   } finally {
-    await context?.close().catch(() => undefined);
-    await browser?.close().catch(() => undefined);
+    await session?.close().catch(() => undefined);
     process.off('SIGINT', interrupt);
     process.off('SIGTERM', interrupt);
   }

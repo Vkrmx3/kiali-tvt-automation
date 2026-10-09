@@ -8,6 +8,7 @@ coverage/
 auth/*
 !auth/.gitkeep
 auth/kiali-session.json
+auth/kiali-edge-profile/
 output/*
 !output/.gitkeep
 temp/*

@@ -129,7 +129,45 @@ async function collect(names: string[]): Promise<ServiceResult[]> {
 }
 
 describe('real Chromium, loopback Kiali fixtures only', () => {
-  it.each(['Authentication required', 'Please sign in', 'Your session has expired'])('does not mistake application log text for a login page: %s', async (message) => {
+  it('waits for session bootstrap on each workload navigation instead of treating a temporary login heading as expiry', async () => {
+    await context.route('**/namespaces/test/workloads/session-bootstrap?*', async (route) => {
+      const tab = new URL(route.request().url()).searchParams.get('tab');
+      const content = `<h1>Workload: session-bootstrap</h1><div role="tablist"><button role="tab" aria-selected="${tab === 'info'}">Overview</button><button role="tab" aria-selected="${tab === 'logs'}">Logs</button></div><label><input type="checkbox" id="container-0" checked>session-bootstrap</label><div id="logsText" role="log">APPLICATION ready</div>`;
+      await route.fulfill({
+        contentType: 'text/html',
+        body: `<h1>Log in</h1><script>setTimeout(() => { document.body.innerHTML = ${JSON.stringify(content)}; }, 350);</script>`,
+      });
+    });
+    const results = await collect(['session-bootstrap', 'good-app']);
+    expect(results.map((result) => result.result)).toEqual(['PASS', 'PASS']);
+    expect(results[0]!.overviewStatus).toBe('CAPTURED');
+    expect(results[0]!.logsStatus).toBe('CAPTURED');
+  });
+
+  it('ignores authentication-related headings and buttons without URL or form evidence', async () => {
+    const page = await context.newPage();
+    try {
+      await page.goto(`${config.kialiBaseUrl}/namespaces/test/workloads/good-app?tab=info`);
+      await page.setContent('<h1>Log in</h1><h2>Authentication failed</h2><button>Sign in</button><p>Unauthorized 401 403</p>');
+      expect(await isAuthenticationPage(page, config)).toBe(false);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('does not capture a login form that persists through bootstrap', async () => {
+    await context.route('**/namespaces/test/workloads/persistent-login?*', (route) => route.fulfill({
+      contentType: 'text/html', body: '<h1>Log in</h1><form id="login-form"><button>Continue</button></form>',
+    }));
+    const results = await collect(['persistent-login', 'good-app']);
+    expect(results.map((result) => result.result)).toEqual(['FAILED', 'FAILED']);
+    expect(results[0]!.remarks.join(' ')).toContain('visible login form');
+    expect(results[0]!.overviewScreenshotPath).toBeUndefined();
+    expect(results[0]!.errorScreenshotPath).toBeUndefined();
+    expect(results[1]!.overviewStatus).toBe('NOT ATTEMPTED');
+  });
+
+  it.each(['Authentication required', 'Authentication failed', 'login', 'unauthorized', '401', '403', 'Please sign in', 'Your session has expired'])('does not mistake application log text for a login page: %s', async (message) => {
     const page = await context.newPage();
     try {
       await page.goto(`${config.kialiBaseUrl}/namespaces/test/workloads/good-app?tab=logs`);
@@ -149,6 +187,22 @@ describe('real Chromium, loopback Kiali fixtures only', () => {
       await page.setContent('<h1>Workload: good-app</h1><div id="logsText" role="log">APPLICATION ready</div><div role="dialog"><h2>Sign in</h2><input type="password"></div>');
       expect(await isAuthenticationPage(page, config)).toBe(true);
       await expect(assertAuthenticated(page, config)).rejects.toThrow('npm run login');
+    } finally {
+      await page.close();
+    }
+  });
+
+  it.each([
+    '<input type="password">',
+    '<form id="login-form"><button>Continue</button></form>',
+    '<form id="loginForm"><button>Continue</button></form>',
+    '<form action="/oauth2/authorize"><button>Continue</button></form>',
+  ])('detects visible password or stable login form evidence', async (content) => {
+    const page = await context.newPage();
+    try {
+      await page.goto(`${config.kialiBaseUrl}/namespaces/test/workloads/good-app?tab=logs`);
+      await page.setContent(content);
+      expect(await isAuthenticationPage(page, config)).toBe(true);
     } finally {
       await page.close();
     }
@@ -217,17 +271,52 @@ describe('real Chromium, loopback Kiali fixtures only', () => {
     expect(results[1]!.result).toBe('PASS');
   });
 
-  it.each(['expired', 'api-unauthorized'])('stops captures after authentication failure: %s', async (name) => {
-    const results = await collect([name, 'good-app']);
+  it('retries once, saves a redacted authentication check, then skips later services for a confirmed login URL', async () => {
+    const results = await collect(['expired', 'good-app']);
     expect(results.map((result) => result.result)).toEqual(['FAILED', 'FAILED']);
     expect(results[0]!.errorScreenshotPath).toBeUndefined();
     expect(results[0]!.logsScreenshotPath).toBeUndefined();
     expect(results[1]!.overviewStatus).toBe('NOT ATTEMPTED');
     expect(results[1]!.remarks.join(' ')).toContain('npm run login');
     expect(JSON.stringify(results)).not.toMatch(/synthetic-sensitive-code|synthetic-password/);
-    expect(results[0]!.remarks.join(' ')).toContain(name === 'api-unauthorized' ? 'Kiali pod logs API returned HTTP 401' : 'redirected to a sign-in');
+    expect(results[0]!.remarks.join(' ')).toContain('redirected to a known sign-in URL');
     expect(requests.some((request) => request.pathname.endsWith('/good-app'))).toBe(false);
-    if (name === 'expired') expect(await readdir(path.join(directory, name))).toEqual([]);
+    expect(requests.filter((request) => request.pathname.endsWith('/expired'))).toHaveLength(2);
+    expect(await readdir(path.join(directory, 'expired'))).toEqual(['authentication-check.png']);
+    expect(PNG.sync.read(await readFile(path.join(directory, 'expired', 'authentication-check.png'))).width).toBe(1920);
+  });
+
+  it('does not skip later services when only the logs API returns HTTP 401', async () => {
+    const results = await collect(['api-unauthorized', 'good-app']);
+    expect(results.map((result) => result.result)).toEqual(['FAILED', 'PASS']);
+    expect(results[0]!.remarks.join(' ')).toContain('HTTP 401');
+    expect(results[0]!.overviewStatus).toBe('CAPTURED');
+    expect(results[1]!.logsStatus).toBe('CAPTURED');
+  });
+
+  it('recovers from a login redirect on the single retry using the same context', async () => {
+    let navigations = 0;
+    const contexts = browser.contexts();
+    await context.route('**/namespaces/test/workloads/recover-login?*', async (route) => {
+      if (++navigations === 1) await route.fulfill({ status: 302, headers: { location: '/login?code=synthetic-code' } });
+      else await route.fulfill({ contentType: 'text/html', body: fixtureHtml('recover-login', new URL(route.request().url()).searchParams.get('tab') ?? 'info') });
+    });
+    const results = await collect(['recover-login', 'good-app']);
+    expect(results.map((result) => result.result)).toEqual(['PASS WITH WARNING', 'PASS']);
+    expect(navigations).toBe(3);
+    expect(browser.contexts()).toEqual(contexts);
+    expect(results[0]!.remarks.join(' ')).toContain('recovered after one');
+  });
+
+  it('does not set global authentication failure when the retry fails for a normal page reason', async () => {
+    let navigations = 0;
+    await context.route('**/namespaces/test/workloads/retry-error?*', async (route) => {
+      if (++navigations === 1) await route.fulfill({ status: 302, headers: { location: '/login' } });
+      else await route.fulfill({ status: 503, contentType: 'text/html', body: '<h1>Service unavailable</h1>' });
+    });
+    const results = await collect(['retry-error', 'good-app']);
+    expect(results.map((result) => result.result)).toEqual(['FAILED', 'PASS']);
+    expect(results[0]!.remarks.join(' ')).toContain('HTTP 503');
   });
 
   it('records empty logs and ambiguous containers as non-fatal warnings', async () => {
