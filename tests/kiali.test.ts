@@ -9,7 +9,7 @@ import { PNG } from 'pngjs';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { collectServices } from '../src/collect.js';
 import { parseConfig } from '../src/config.js';
-import { assertAuthenticated, enableReadOnlyRequests, prepareWorkloadPage } from '../src/kiali.js';
+import { assertAuthenticated, enableReadOnlyRequests, isAuthenticationPage, prepareWorkloadPage } from '../src/kiali.js';
 import { runTvt } from '../src/run-tvt.js';
 import { captureScreenshot } from '../src/screenshots.js';
 import { verifyWorkbook } from '../src/workbook.js';
@@ -129,6 +129,31 @@ async function collect(names: string[]): Promise<ServiceResult[]> {
 }
 
 describe('real Chromium, loopback Kiali fixtures only', () => {
+  it.each(['Authentication required', 'Please sign in', 'Your session has expired'])('does not mistake application log text for a login page: %s', async (message) => {
+    const page = await context.newPage();
+    try {
+      await page.goto(`${config.kialiBaseUrl}/namespaces/test/workloads/good-app?tab=logs`);
+      await page.setContent(`<h1>Workload: good-app</h1><button role="tab" aria-selected="true">Logs</button><div id="logsText" role="log">${message}</div>`);
+      expect(await isAuthenticationPage(page, config)).toBe(false);
+      await assertAuthenticated(page, config);
+      expect(await page.locator('#logsText').innerText()).toBe(message);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('still detects a sign-in overlay while workload logs remain visible', async () => {
+    const page = await context.newPage();
+    try {
+      await page.goto(`${config.kialiBaseUrl}/namespaces/test/workloads/good-app?tab=logs`);
+      await page.setContent('<h1>Workload: good-app</h1><div id="logsText" role="log">APPLICATION ready</div><div role="dialog"><h2>Sign in</h2><input type="password"></div>');
+      expect(await isAuthenticationPage(page, config)).toBe(true);
+      await expect(assertAuthenticated(page, config)).rejects.toThrow('npm run login');
+    } finally {
+      await page.close();
+    }
+  });
+
   it('tolerates an aborted log request when a replacement completes', async () => {
     const [result] = await collect(['cancelled-refresh']);
     expect(result!.result).toBe('PASS');
@@ -200,6 +225,7 @@ describe('real Chromium, loopback Kiali fixtures only', () => {
     expect(results[1]!.overviewStatus).toBe('NOT ATTEMPTED');
     expect(results[1]!.remarks.join(' ')).toContain('npm run login');
     expect(JSON.stringify(results)).not.toMatch(/synthetic-sensitive-code|synthetic-password/);
+    expect(results[0]!.remarks.join(' ')).toContain(name === 'api-unauthorized' ? 'Kiali pod logs API returned HTTP 401' : 'redirected to a sign-in');
     expect(requests.some((request) => request.pathname.endsWith('/good-app'))).toBe(false);
     if (name === 'expired') expect(await readdir(path.join(directory, name))).toEqual([]);
   });
