@@ -1,5 +1,6 @@
 export interface AppConfig {
   environment: string;
+  authenticationMode: 'storageState' | 'persistentProfile';
   kialiBaseUrl: string;
   overviewDurationSeconds: number;
   logsDurationSeconds: number;

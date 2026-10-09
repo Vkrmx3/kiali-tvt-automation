@@ -1,11 +1,11 @@
 import { mkdir } from 'node:fs/promises';
 import path from 'node:path';
-import type { BrowserContext, Page, Response } from 'playwright';
-import { apiAuthenticationError, assertWorkloadView, canCaptureDiagnostic, getAuthenticationError, prepareWorkloadPage } from './kiali.js';
-import { AuthenticationError, TvtError, progress, safeErrorMessage } from './logger.js';
+import type { BrowserContext, Page } from 'playwright';
+import { assertWorkloadView, canCaptureDiagnostic, getAuthenticationError, prepareWorkloadPage, workloadUrl } from './kiali.js';
+import { AuthenticationError, TvtError, logDiagnosticUrl, progress, safeErrorMessage } from './logger.js';
 import { createSheetNames, safePathSegment } from './naming.js';
 import { createServiceResult, finishResult } from './results.js';
-import { captureScreenshot } from './screenshots.js';
+import { captureAuthenticationCheck, captureScreenshot } from './screenshots.js';
 import type { AppConfig, Service, ServiceResult } from './types.js';
 
 type ProgressReporter = (index: number, total: number, message: string) => void;
@@ -15,11 +15,6 @@ export async function collectServices(context: BrowserContext, services: Service
   const results: ServiceResult[] = [];
   const usedDirectories = new Set<string>();
   let authenticationFailure: AuthenticationError | undefined;
-  const onResponse = (response: Response): void => {
-    authenticationFailure ??= apiAuthenticationError(response, config);
-  };
-  context.on('response', onResponse);
-  try {
     for (const [index, service] of services.entries()) {
       const result = createServiceResult(service, sheetNames[index]!);
       results.push(result);
@@ -44,25 +39,47 @@ export async function collectServices(context: BrowserContext, services: Service
           const label = tab === 'info' ? 'Overview' : 'Logs';
           const statusKey = `${kind}Status` as const;
           try {
-            if (authenticationFailure) throw authenticationFailure;
-            if (signal?.aborted) throw new TvtError('INTERRUPTED', 'Run was interrupted.');
-            if (!page || page.isClosed()) page = await context.newPage();
-            const activePage = page;
-            result.remarks.push(...await prepareWorkloadPage(activePage, config, service, tab, logsDurationSeconds));
-            const destination = path.join(directory, tab === 'info' ? '01-overview.png' : '02-logs.png');
-            result.remarks.push(...await captureScreenshot(activePage, config, destination, kind, async () => {
-              if (authenticationFailure) throw authenticationFailure;
-              await assertWorkloadView(activePage, config, service, tab, logsDurationSeconds);
-            }));
-            result[`${kind}ScreenshotPath`] = destination;
-            result[statusKey] = 'CAPTURED';
-            result.captureTimestamp = new Date();
-            report(index, services.length, `${label} captured`);
+            for (let attempt = 0; attempt < 2; attempt++) {
+              if (signal?.aborted) throw new TvtError('INTERRUPTED', 'Run was interrupted.');
+              if (!page || page.isClosed()) page = await context.newPage();
+              const activePage = page;
+              try {
+                const notes = await prepareWorkloadPage(activePage, config, service, tab, logsDurationSeconds);
+                const destination = path.join(directory, tab === 'info' ? '01-overview.png' : '02-logs.png');
+                notes.push(...await captureScreenshot(activePage, config, destination, kind, async () => {
+                  await assertWorkloadView(activePage, config, service, tab, logsDurationSeconds);
+                }));
+                result.remarks.push(...notes);
+                if (attempt) result.remarks.push(`${label}: recovered after one authentication-page retry.`);
+                result[`${kind}ScreenshotPath`] = destination;
+                result[statusKey] = 'CAPTURED';
+                result.captureTimestamp = new Date();
+                report(index, services.length, `${label} captured`);
+                break;
+              } catch (error) {
+                logDiagnosticUrl(activePage.url(), 'Current');
+                const confirmed = await getAuthenticationError(activePage, config).catch(() => undefined);
+                if (!confirmed) throw error;
+                try {
+                  await captureAuthenticationCheck(activePage, config, directory);
+                } catch {
+                  result.remarks.push('Redacted authentication diagnostic could not be captured.');
+                }
+                if (attempt === 0 && !signal?.aborted) {
+                  report(index, services.length, `${label}: checking the target again before confirming authentication failure.`);
+                  logDiagnosticUrl(workloadUrl(config, service, tab, logsDurationSeconds), 'Retry');
+                  continue;
+                }
+                if (signal?.aborted) throw new TvtError('INTERRUPTED', 'Run was interrupted.');
+                const finalConfirmation = await getAuthenticationError(activePage, config).catch(() => undefined);
+                if (!finalConfirmation) throw new TvtError('PAGE_CHANGED', 'The authentication page changed during confirmation. No global authentication failure was declared.');
+                authenticationFailure = finalConfirmation;
+                throw finalConfirmation;
+              }
+            }
           } catch (error) {
             result[statusKey] = 'FAILED';
-            const authError: AuthenticationError | undefined = error instanceof AuthenticationError ? error : authenticationFailure ?? (page && await getAuthenticationError(page, config).catch(() => undefined));
-            if (authError) authenticationFailure = authError;
-            const message = authError ? safeErrorMessage(authError) : signal?.aborted ? 'Run was interrupted.' : safeErrorMessage(error);
+            const message = signal?.aborted ? 'Run was interrupted.' : safeErrorMessage(error);
             result.remarks.push(`${label}: ${message}`);
             report(index, services.length, `${label} failed: ${message}`);
             if (!authenticationFailure && page && !result.errorScreenshotPath && await canCaptureDiagnostic(page, config, service).catch(() => false)) {
@@ -90,8 +107,5 @@ export async function collectServices(context: BrowserContext, services: Service
       }
       report(index, services.length, result.result);
     }
-  } finally {
-    context.off('response', onResponse);
-  }
   return results;
 }

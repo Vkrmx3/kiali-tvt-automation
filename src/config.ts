@@ -33,6 +33,10 @@ export function parseConfig(input: unknown, baseUrlOverride?: string): AppConfig
     throw new TvtError('CONFIG', 'Configuration must be a JSON object.');
   }
   const settings = input as Record<string, unknown>;
+  const authenticationMode = settings.authenticationMode ?? 'storageState';
+  if (authenticationMode !== 'storageState' && authenticationMode !== 'persistentProfile') {
+    throw new TvtError('CONFIG', 'authenticationMode must be storageState or persistentProfile.');
+  }
   const environment = settings.environment ?? 'Production';
   if (typeof environment !== 'string' || !environment.trim() || environment.length > 200 || /[\x00-\x1f\x7f]/.test(environment)) {
     throw new TvtError('CONFIG', 'environment must be a non-empty, single-line label of at most 200 characters.');
@@ -44,6 +48,7 @@ export function parseConfig(input: unknown, baseUrlOverride?: string): AppConfig
   }
   return {
     environment: environment.trim(),
+    authenticationMode,
     kialiBaseUrl: validateBaseUrl(baseUrlOverride ?? settings.kialiBaseUrl),
     overviewDurationSeconds: integerSetting(settings, 'overviewDurationSeconds', 1, 86400),
     logsDurationSeconds: integerSetting(settings, 'logsDurationSeconds', 60, 86400),

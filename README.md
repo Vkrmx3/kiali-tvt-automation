@@ -58,11 +58,12 @@ browser/OS certificate configuration.
 npm run login
 ```
 
-Chromium opens visibly at the configured Kiali base URL. Complete corporate SSO
+The configured browser opens visibly at the Kiali base URL. Complete corporate SSO
 and MFA **in the browser**, then press Enter in the terminal after Kiali loads.
 Do not type passwords, MFA codes, or tokens into the terminal. The command
-checks that Kiali navigation is visible before saving Playwright storage state
-to `auth/kiali-session.json` and closing the browser.
+checks that Kiali navigation is visible before retaining the selected session
+and closing the browser. The default `storageState` mode uses Chromium and saves
+Playwright state to `auth/kiali-session.json`.
 
 The directory is created automatically. The state contains cookies, local
 storage, and supported IndexedDB state; it is sensitive and must not be shared
@@ -73,13 +74,41 @@ depends exclusively on sessionStorage may need deployment-specific handling.
 
 Use `npm run login -- --settings alternate-config.json` for alternative settings.
 
+### Optional Dedicated Edge Profile
+
+Set this property in `config.json` to use your installed Microsoft Edge:
+
+```json
+"authenticationMode": "persistentProfile"
+```
+
+Then run `npm.cmd run login` inside VDI. This mode uses
+`chromium.launchPersistentContext()` with `channel: "msedge"` and the dedicated
+`auth/kiali-edge-profile` directory. It never uses your normal Edge profile.
+Login and TVT use that same directory; a non-secret initialization marker is
+written after successful manual login. The storage-state JSON is not used in
+this mode. Edge must already be installed through your approved IT process.
+
+Do not run two login/TVT processes against the profile at the same time. Close
+the utility's login browser before starting TVT. Keep the entire profile private;
+it contains browser authentication data and is excluded from Git. Session expiry
+can still require another manual login. To switch back, set
+`"authenticationMode": "storageState"` and initialize that mode with login.
+
+Both modes create one browser context for the entire TVT run. Overview, Logs,
+retries, and subsequent services reuse that authenticated context; new pages do
+not create new contexts. No session data is printed or embedded in the workbook.
+
 ## First Live Validation
 
 After logging in, run only one service initially:
 
 ```sh
-npm run tvt -- --release "Test-Release" --service "kafka-ui" --headed --keep-temp
+npm.cmd run tvt -- --release "Test-Release" --service "security-movement-out-v1" --headed --keep-temp
 ```
+
+Ensure that service is enabled in the CSV. Run this inside VDI; do not attempt
+production Kiali access from an outside machine.
 
 Review the Summary and service sheet. Confirm that the expected workload,
 Overview content, Logs tab, application container, and requested log period are
@@ -105,7 +134,7 @@ npm run tvt -- --release "Release-2026-10-09" --config "services.csv"
 | --- | --- |
 | `--release <name>` | Required, non-empty release label, at most 200 characters. The original label is displayed; the filename is sanitized. |
 | `--minutes <integer>` | Override log duration, from 1 through 1440 minutes. Defaults to the configured log duration, normally 15 minutes. |
-| `--headed` | Show Chromium. Otherwise use `defaultHeadless`. |
+| `--headed` | Show the configured Chromium or Edge browser. Otherwise use `defaultHeadless`. |
 | `--service <name>` | Process one enabled service by exact, case-sensitive `serviceName`. |
 | `--config <path>` | Service CSV, default `services.csv`. This is **not** the JSON settings path. |
 | `--settings <path>` | Application settings JSON, default `config.json`. |
@@ -149,6 +178,7 @@ anz-adapter-service-v1,backoffice,anz-adapter-service-v1,true
 ```json
 {
   "environment": "Production",
+  "authenticationMode": "storageState",
   "kialiBaseUrl": "https://kiali.prd.ausiex.com.au/kiali/console",
   "overviewDurationSeconds": 300,
   "logsDurationSeconds": 900,
@@ -162,6 +192,8 @@ anz-adapter-service-v1,backoffice,anz-adapter-service-v1,true
 ```
 
 `environment` is the Summary label; it defaults to `Production` when omitted.
+`authenticationMode` accepts only `storageState` (the default when omitted) or
+`persistentProfile` (the dedicated installed-Edge profile described above).
 `KIALI_BASE_URL` overrides only `kialiBaseUrl`. Change `environment` yourself when
 switching environments. Base URLs must use HTTPS, except loopback HTTP for
 offline tests, and must not contain credentials, query parameters, or fragments.
@@ -273,6 +305,7 @@ hyperlinks, embedded PNG payloads, absence of formulas, and a non-empty file.
 temp/<safe-release>/<safe-service>/01-overview.png
 temp/<safe-release>/<safe-service>/02-logs.png
 temp/<safe-release>/<safe-service>/error.png
+temp/<safe-release>/<safe-service>/authentication-check.png
 ```
 
 Existing release directories are never reused: a timestamped suffix protects
@@ -286,12 +319,31 @@ prevent an attempt to capture Logs, and a failed service does not stop later
 services. Successfully captured tabs are retained. Missing or unreadable PNGs
 also downgrade the affected result rather than breaking other service sheets.
 
-Authentication failure is the exception: further navigation stops, and every
-remaining service receives a FAILED/not-attempted Summary row. Login pages
-are never intentionally saved as screenshots or embedded as evidence.
-Navigation and authentication are checked again after capture, before writing
-image bytes. Ctrl+C during collection closes Chromium and attempts to generate
-a partial workbook; unattempted services are recorded as failed.
+Authentication is confirmed from a known login/OAuth/OpenID/Microsoft/ADFS URL,
+a visible password input, or a visible login form with stable login-related
+attributes. Arbitrary body text, headings, buttons, and application log messages
+such as "authentication failed", "unauthorized", "401", or "403" do not establish
+authentication failure. A required API returning 401/403 fails that service's
+capture, but does not by itself skip other services.
+
+When a login page is detected, the collector attempts a separate
+`authentication-check.png`, retries the exact target once using the same context,
+and stops subsequent services only if login evidence remains confirmed. A
+successful retry is recorded as a warning. A retry that fails for a normal page
+reason does not set global authentication failure.
+
+The authentication diagnostic is not workbook evidence and is never embedded.
+Forms, inputs, editable fields, and image/canvas/SVG elements are masked in it
+to avoid capturing credential fields or QR challenges. The latest check replaces
+an earlier check for the same service. Use `--keep-temp` to retain it after
+workbook creation, and treat it as confidential. If capture is impossible, a
+sanitized note records that limitation. Normal Overview/Logs images are not masked.
+
+Diagnostic console URLs contain only origin and pathname, never URL credentials,
+query strings, or fragments. Navigation and authentication are checked before and
+after evidence capture. Ctrl+C during collection closes the configured browser
+and attempts to generate a partial workbook; unattempted services are recorded
+as failed.
 
 Exit codes: `0` for no failed services (warnings allowed), `1` for failed
 services or setup/output errors, and `130` for an interrupted collection when
@@ -303,7 +355,10 @@ in `finally` blocks. A forced OS termination cannot guarantee finalization.
 | Symptom | Action |
 | --- | --- |
 | `Authentication session not found. Run: npm run login` | Run initial login from an interactive terminal. |
-| Login redirect, HTTP 401, or expired session | Run `npm run login` again. Then repeat the limited headed test. |
+| Confirmed login page after the retry | Run `npm run login` in the selected mode, then repeat the limited headed test. |
+| API HTTP 401/403 without a login page | Check workload/pod-log permissions and session validity. This is service-scoped; later services continue. |
+| Dedicated Edge profile is not initialized | Select `persistentProfile`, then run `npm run login` inside VDI. |
+| Dedicated Edge profile cannot open | Ensure Edge is installed and no other utility process is using the profile. Your regular Edge profile is not involved. |
 | Missing Chromium executable | Run `npx playwright install chromium`. |
 | `npm.ps1 cannot be loaded` | Use `npm.cmd` and `npx.cmd` on PowerShell. |
 | DNS, connection, or navigation failure | Check VPN, Kiali URL, network access, and certificate trust. |
@@ -334,8 +389,10 @@ configuration, formula safety, URL parameters, and command guards. Workbook
 tests generate PNGs and inspect reopened ExcelJS workbooks. Browser tests launch
 real Chromium against a temporary loopback fixture server and close it afterward.
 They verify container selection, capture dimensions and nonblank pixels, failed
-service continuation, authentication suppression, read-only requests, and the
-end-to-end report/cleanup flow. There is no development server to leave running.
+service continuation, positive authentication detection, retry confirmation,
+redacted diagnostics, read-only requests, and the end-to-end report/cleanup flow.
+Unit tests verify Edge channel/profile selection and shared-context lifecycle
+without requiring Edge installation. There is no development server to leave running.
 
 `sample:workbook` writes `output/TVT-Workbook-Sample.xlsx` (or a timestamped
 variant), with clearly labelled generated fixtures, not real Kiali evidence.
@@ -344,12 +401,14 @@ Do not use it as release sign-off evidence.
 
 ## Security and Retention
 
-- Never commit or share `auth/kiali-session.json`. Git ignores all authentication
+- Never commit or share `auth/kiali-session.json` or `auth/kiali-edge-profile/`. Git ignores all authentication
   contents, workbooks, temporary evidence, local environment files, and test logs.
 - Do not put secrets in settings, CSV, release labels, or command arguments.
 - The utility never logs passwords, MFA codes, cookies, headers, session data,
   browser console output, raw HTML, or raw browser errors. Session state is not
   passed to the workbook writer. Error messages use controlled, sanitized text.
+- Diagnostic URLs contain only origin and pathname. Authentication-check PNGs
+  are masked troubleshooting artifacts, separate from unmodified workload evidence.
 - Screenshots contain real workload information and application logs, which
   may themselves contain sensitive business data. Treat all output and retained
   temporary images as confidential. Review application logging policy before
@@ -368,7 +427,8 @@ verification results and the live-deployment validation boundary.
 
 ## Project Structure
 
-`src/login.ts` handles manual login; `auth.ts` isolates session persistence.
+`src/login.ts` handles manual login; `auth.ts` owns both browser-session modes,
+their persistence, and context cleanup.
 `run-tvt.ts` coordinates options and output; `collect.ts` processes service
 results sequentially. `kiali.ts` owns readiness and container selection;
 `screenshots.ts` owns guarded image capture and temporary directories.

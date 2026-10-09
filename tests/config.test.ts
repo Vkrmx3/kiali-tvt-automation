@@ -6,6 +6,14 @@ import { AuthenticationError, safeErrorMessage } from '../src/logger.js';
 const settings = JSON.parse(readFileSync(new URL('../config.json', import.meta.url), 'utf8')) as Record<string, unknown>;
 
 describe('configuration', () => {
+  it('defaults to storage state and accepts the dedicated profile mode only when explicitly selected', () => {
+    const withoutMode = { ...settings };
+    delete withoutMode.authenticationMode;
+    expect(parseConfig(withoutMode).authenticationMode).toBe('storageState');
+    expect(parseConfig({ ...settings, authenticationMode: 'persistentProfile' }).authenticationMode).toBe('persistentProfile');
+    expect(() => parseConfig({ ...settings, authenticationMode: 'normalEdgeProfile' })).toThrow('authenticationMode');
+  });
+
   it('reads settings with one base URL override', () => {
     const parsed = parseConfig(settings, 'https://example.invalid/kiali/console/');
     expect(parsed.kialiBaseUrl).toBe('https://example.invalid/kiali/console');
