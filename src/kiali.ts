@@ -200,6 +200,73 @@ async function waitUntil(page: Page, config: AppConfig, signals: PageSignals, co
   throw new TvtError('PAGE_TIMEOUT', message);
 }
 
+const relativeRangeLabel = /^Last\s+(\d+)\s*(s(?:ec(?:ond)?s?)?|m(?:in(?:ute)?s?)?|h|hrs?|hours?|d(?:ays?)?)$/i;
+
+function logRangeControl(page: Page): Locator {
+  return page.locator('button[id^="metrics_filter_interval_duration"]')
+    .or(page.getByRole('button', { name: relativeRangeLabel }))
+    .or(page.getByRole('button', { name: 'Custom', exact: true }))
+    .filter({ visible: true });
+}
+
+async function logRangeState(page: Page): Promise<{ controls: number; seconds: number | undefined }> {
+  const labels = await logRangeControl(page).allTextContents();
+  const match = labels.length === 1 ? labels[0]!.trim().match(relativeRangeLabel) : null;
+  const multipliers: Record<string, number> = { s: 1, m: 60, h: 3600, d: 86400 };
+  const seconds = match ? Number(match[1]) * multipliers[match[2]![0]!.toLowerCase()]! : undefined;
+  return { controls: labels.length, seconds };
+}
+
+function requestedRangeLabel(seconds: number): RegExp {
+  const units: Array<[number, string]> = [
+    [1, 's(?:ec(?:ond)?s?)?'], [60, 'm(?:in(?:ute)?s?)?'],
+    [3600, '(?:h|hrs?|hours?)'], [86400, 'd(?:ays?)?'],
+  ];
+  const alternatives = units.filter(([divisor]) => seconds % divisor === 0)
+    .map(([divisor, label]) => `${seconds / divisor}\\s*${label}`);
+  return new RegExp(`^Last\\s+(?:${alternatives.join('|')})$`, 'i');
+}
+
+async function selectRequestedLogRange(page: Page, config: AppConfig, seconds: number): Promise<void> {
+  const state = await logRangeState(page);
+  const queryMatches = new URL(page.url()).searchParams.get('rangeDuration') === String(seconds);
+  if (queryMatches && (state.seconds === seconds || state.controls === 0)) return;
+  if (state.controls !== 1) {
+    throw new TvtError('LOG_RANGE_CONTROL', `Cannot identify a unique time-range control to select the requested ${seconds}-second Logs period.`);
+  }
+  const timeout = Math.min(config.pageTimeoutMilliseconds, 5000);
+  const control = logRangeControl(page);
+  await control.click({ timeout });
+  try {
+    const name = requestedRangeLabel(seconds);
+    const option = page.getByRole('menuitem', { name }).or(page.getByRole('option', { name }))
+      .or(page.getByRole('menuitemradio', { name })).filter({ visible: true });
+    try {
+      await option.first().waitFor({ state: 'visible', timeout });
+    } catch {
+      throw new TvtError('LOG_RANGE_UNSUPPORTED', `Kiali does not offer the requested ${seconds}-second Logs period in the time-range menu. No alternative period was substituted.`);
+    }
+    if (await option.count() !== 1) throw new TvtError('LOG_RANGE_CONTROL', 'The requested Logs period has ambiguous menu options.');
+    await option.click({ timeout });
+  } finally {
+    await page.keyboard.press('Escape').catch(() => undefined);
+  }
+}
+
+async function assertLogRange(page: Page, seconds: number): Promise<void> {
+  const actual = new URL(page.url());
+  const state = await logRangeState(page);
+  if (actual.searchParams.get('rangeDuration') !== String(seconds) ||
+      state.controls > 0 && (state.controls !== 1 || state.seconds !== seconds)) {
+    const observed = state.seconds === undefined ? 'not confirmed by the toolbar' : `${state.seconds} seconds in the toolbar`;
+    throw new TvtError('WRONG_PERIOD', `Requested Logs period is ${seconds} seconds; actual period is ${observed}. Capture was stopped.`);
+  }
+  const refresh = actual.searchParams.get('refresh');
+  if (refresh !== '0' && !(refresh === null && await visible(page.getByRole('button', { name: 'Pause', exact: true })))) {
+    throw new TvtError('WRONG_REFRESH', 'Logs automatic refresh is not confirmed as paused. Capture was stopped.');
+  }
+}
+
 export async function assertWorkloadView(page: Page, config: AppConfig, service: Service, tab: KialiTab, logsDurationSeconds: number): Promise<void> {
   await assertHealthy(page, config);
   const expected = new URL(workloadUrl(config, service, tab, logsDurationSeconds));
@@ -207,9 +274,13 @@ export async function assertWorkloadView(page: Page, config: AppConfig, service:
   if (actual.origin !== expected.origin || actual.pathname !== expected.pathname || actual.searchParams.get('tab') !== tab) {
     throw new TvtError('WRONG_PAGE', 'The browser is not on the requested workload and tab. No evidence was saved.');
   }
-  for (const key of ['duration', 'rangeDuration', 'refresh']) {
-    if (actual.searchParams.get(key) !== expected.searchParams.get(key)) {
-      throw new TvtError('WRONG_PERIOD', 'Kiali changed the requested time range or refresh setting. No misleading evidence was saved.');
+  if (tab === 'logs') {
+    await assertLogRange(page, logsDurationSeconds);
+  } else {
+    for (const key of ['duration', 'rangeDuration', 'refresh']) {
+      if (actual.searchParams.get(key) !== expected.searchParams.get(key)) {
+        throw new TvtError('WRONG_PERIOD', 'Kiali changed the requested Overview time range or refresh setting. No misleading evidence was saved.');
+      }
     }
   }
   if (!(await workloadVisible(page, service))) throw new TvtError('WORKLOAD_ABSENT', 'Expected workload name is not visible.');
@@ -295,6 +366,14 @@ export async function prepareWorkloadPage(page: Page, config: AppConfig, service
       notes.push(...await chooseContainer(page, service, config));
     }
     await waitUntil(page, config, signals, ready, 'The workload view did not finish rendering after container selection.');
+    if (tab === 'logs') {
+      await selectRequestedLogRange(page, config, logsDurationSeconds);
+      await waitUntil(page, config, signals, async () => {
+        const range = await logRangeState(page);
+        return new URL(page.url()).searchParams.get('rangeDuration') === String(logsDurationSeconds) &&
+          (range.controls === 0 || range.controls === 1 && range.seconds === logsDurationSeconds) && await ready();
+      }, 'The requested Logs period did not finish applying or its log data did not finish loading.');
+    }
     if (config.renderWaitMilliseconds) await page.waitForTimeout(config.renderWaitMilliseconds);
     await waitUntil(page, config, signals, ready, 'The workload view did not stabilize before capture.');
     await assertWorkloadView(page, config, service, tab, logsDurationSeconds);

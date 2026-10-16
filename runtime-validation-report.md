@@ -1,6 +1,6 @@
 # Runtime Validation Report
 
-Date: 2026-10-10
+Date: 2026-10-16
 
 Target: local kiali-tvt-automation CLI. No corporate Kiali login or live workload
 collection was attempted. No CI/CD or production infrastructure was created.
@@ -19,7 +19,7 @@ collection was attempted. No CI/CD or production infrastructure was created.
 | Check | Status | Exit code | Evidence |
 | --- | --- | --- | --- |
 | `npm run build` | PASS | 0 | Strict TypeScript compilation with no emit. |
-| `npm test` | PASS | 0 | 106 passed, 0 failed, 0 skipped, across seven test files. |
+| `npm test` | PASS | 0 | 117 passed, 0 failed, 0 skipped, across seven test files. |
 | `npm run login -- --help` | PASS | 0 | Login entry point loads without opening a browser. |
 | `npm run tvt -- --help` | PASS | 0 | All documented execution options are available. |
 | Dedicated Edge profile round trip | PASS | 0 | Real Edge retained a synthetic loopback cookie after closing and reopening the same temporary profile. No Kiali navigation or existing user profile access. |
@@ -40,6 +40,10 @@ Git-ignored machine-readable result is
   messages, diagnostic images, and collision-safe output publication.
 - Real Chromium navigation with reordered query parameters, loading states,
   container selection, nonblank pixels, and viewport-limited Logs screenshots.
+- Logs time-range restoration from 30 to the requested 15 minutes, waiting for
+  refreshed log data, and normal evidence capture followed by the next service.
+  Range validation is independent of Overview duration. Wrong ranges, unsupported
+  menu options, active refresh, and missing pause evidence remain failures.
 - Continuation after failed workloads; preservation of a successful Overview
   when Logs fails; browser/page cleanup; selected and disabled service behavior.
 - Log text, headings, and buttons containing login/authentication/401/403 wording
@@ -59,6 +63,11 @@ Git-ignored machine-readable result is
 
 ## Fixes Verified
 
+- Reproduced the reported Logs range error locally with Kiali-style time-control
+  state restoring 30 minutes while the command requests 15. The utility now
+  selects the requested time-range option and verifies the resulting range and
+  paused refresh state instead of requiring unrelated URL parameters to remain
+  byte-for-byte unchanged. This is not a bypass of actual range validation.
 - Removed body-text authentication heuristics and the global API-401 listener.
   Added origin/path-only diagnostic URL logging and confirmed retry handling.
 - Added optional `authenticationMode: persistentProfile` using installed Edge
@@ -81,7 +90,7 @@ Git-ignored machine-readable result is
 Both were medium severity. The final scan of the two patched resolutions found
 no known CVEs at the original dependency assessment. Nineteen focused
 CSV/workbook checks passed after installation; the current complete suite has
-106 passing tests. The UUID override preserves CommonJS compatibility.
+117 passing tests. The UUID override preserves CommonJS compatibility.
 
 ## Security Review
 
