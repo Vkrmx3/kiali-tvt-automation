@@ -9,7 +9,7 @@ import { PNG } from 'pngjs';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { collectServices } from '../src/collect.js';
 import { parseConfig } from '../src/config.js';
-import { assertAuthenticated, enableReadOnlyRequests, isAuthenticationPage, prepareWorkloadPage } from '../src/kiali.js';
+import { assertAuthenticated, assertWorkloadView, enableReadOnlyRequests, isAuthenticationPage, prepareWorkloadPage } from '../src/kiali.js';
 import { runTvt } from '../src/run-tvt.js';
 import { captureScreenshot } from '../src/screenshots.js';
 import { verifyWorkbook } from '../src/workbook.js';
@@ -27,6 +27,7 @@ function fixtureHtml(workload: string, tab: string): string {
   const displayedWorkload = workload === 'wrong-workload' ? 'unrelated-service' : workload;
   const title = `<h1>Workload: ${displayedWorkload}</h1>`;
   const tabs = `<div role="tablist"><button role="tab" aria-selected="${tab === 'info'}">Overview</button><button role="tab" aria-selected="${tab === 'logs'}">Logs</button></div>`;
+  let controls = '';
   let content = '<section><h2>Health</h2><p>Healthy: all local fixture pods are ready.</p></section>';
   let script = '';
   if (workload === 'generic-error') content = '<div role="alert">Could not fetch Workload.</div>';
@@ -49,9 +50,35 @@ function fixtureHtml(workload: string, tab: string): string {
       fetch('/api/namespaces/test/pods/cancelled-refresh/logs?cancelled=true', {signal: controller.signal}).catch(() => undefined);
       setTimeout(() => controller.abort(), 30);
       ${script}`;
+    if (workload === 'range-reset') {
+      controls = '<button id="range-toggle" aria-haspopup="menu" aria-expanded="false">Last 30m</button><div id="range-options" role="menu" hidden><button role="menuitem" id="range-15">Last 15m</button></div><button>Pause</button>';
+      script += `
+        const resetRange = new URLSearchParams(location.search);
+        resetRange.set('duration', '300');
+        resetRange.set('rangeDuration', '1800');
+        resetRange.delete('refresh');
+        history.replaceState(null, '', location.pathname + '?' + resetRange.toString());
+        document.getElementById('range-toggle').onclick = () => {
+          document.getElementById('range-options').hidden = false;
+          document.getElementById('range-toggle').setAttribute('aria-expanded', 'true');
+        };
+        document.getElementById('range-15').onclick = async () => {
+          const selectedRange = new URLSearchParams(location.search);
+          selectedRange.set('rangeDuration', '900');
+          history.replaceState(null, '', location.pathname + '?' + selectedRange.toString());
+          document.getElementById('range-toggle').textContent = 'Last 15m';
+          document.getElementById('range-toggle').setAttribute('aria-expanded', 'false');
+          document.getElementById('range-options').hidden = true;
+          document.getElementById('logsText').setAttribute('aria-busy', 'true');
+          await fetch('/api/namespaces/test/pods/range-reset/logs?sinceTime=' + (Math.floor(Date.now() / 1000) - 900));
+          document.getElementById('logsText').textContent = 'APPLICATION logs for the selected 15 minutes';
+          document.getElementById('logsText').removeAttribute('aria-busy');
+        };
+      `;
+    }
   }
   if (workload === 'too-tall' && tab === 'info') content += '<section style="height:5000px">Additional overview data</section>';
-  return `<!doctype html><html><head><title>Local Kiali Fixture</title><style>body{font:18px sans-serif;margin:32px;background:#f4f6f8;color:#172c46}nav{padding:12px;background:#dce5ef}button{padding:12px;margin:4px}section{margin:24px 0;padding:20px;background:white}#logsText{white-space:pre;height:600px;overflow:auto;background:#17212c;color:white;padding:20px}label{margin:12px;display:inline-block}</style></head><body><nav><a href="/kiali/console">Workloads</a></nav><main>${title}${tabs}<div role="progressbar" aria-label="Loading workload"></div>${content}</main><script>
+  return `<!doctype html><html><head><title>Local Kiali Fixture</title><style>body{font:18px sans-serif;margin:32px;background:#f4f6f8;color:#172c46}nav{padding:12px;background:#dce5ef}button{padding:12px;margin:4px}section{margin:24px 0;padding:20px;background:white}#logsText{white-space:pre;height:600px;overflow:auto;background:#17212c;color:white;padding:20px}label{margin:12px;display:inline-block}</style></head><body><nav><a href="/kiali/console">Workloads</a></nav><main>${title}${controls}${tabs}<div role="progressbar" aria-label="Loading workload"></div>${content}</main><script>
     setTimeout(() => document.querySelector('[role="progressbar"]').remove(), 60);
     const reordered = new URLSearchParams([...new URLSearchParams(location.search)].reverse());
     history.replaceState(null, '', location.pathname + '?' + reordered.toString());
@@ -129,6 +156,75 @@ async function collect(names: string[]): Promise<ServiceResult[]> {
 }
 
 describe('real Chromium, loopback Kiali fixtures only', () => {
+  it('selects the requested log period when Kiali resets it and normalizes unrelated URL parameters', async () => {
+    const page = await context.newPage();
+    try {
+      const notes = await prepareWorkloadPage(page, config, { serviceName: 'range-reset', namespace: 'test', workload: 'range-reset' }, 'logs', 900);
+      expect(notes).toEqual([]);
+      expect(await page.getByRole('button', { name: 'Last 15m', exact: true }).isVisible()).toBe(true);
+      expect(new URL(page.url()).searchParams.get('rangeDuration')).toBe('900');
+      expect(await page.locator('#logsText').innerText()).toContain('selected 15 minutes');
+    } finally {
+      await page.close();
+    }
+  });
+
+  it.each(['Last 60m', 'Last 1h', 'Last 1 hour'])('verifies the effective Logs period with toolbar label %s independently of Overview duration', async (label) => {
+    const page = await context.newPage();
+    try {
+      await page.goto(`${config.kialiBaseUrl}/namespaces/test/workloads/good-app?tab=logs&duration=300&rangeDuration=3600&refresh=0`);
+      await page.setContent(`<h1>Workload: good-app</h1><button role="tab" aria-selected="true">Logs</button><button>${label}</button><div role="log">APPLICATION ready</div>`);
+      await expect(assertWorkloadView(page, config, { serviceName: 'good-app', namespace: 'test', workload: 'good-app' }, 'logs', 3600)).resolves.toBeUndefined();
+    } finally {
+      await page.close();
+    }
+  });
+
+  it.each([
+    { query: 'rangeDuration=1800&refresh=0', label: 'Last 30m', pause: true, error: 'Requested Logs period' },
+    { query: 'rangeDuration=900&refresh=0', label: 'Last 30m', pause: true, error: 'Requested Logs period' },
+    { query: 'rangeDuration=900&refresh=30', label: 'Last 15m', pause: false, error: 'automatic refresh' },
+    { query: 'rangeDuration=900', label: 'Last 15m', pause: false, error: 'automatic refresh' },
+  ])('rejects a wrong Logs range or unverified refresh setting: $query / $label', async ({ query, label, pause, error }) => {
+    const page = await context.newPage();
+    try {
+      await page.goto(`${config.kialiBaseUrl}/namespaces/test/workloads/good-app?tab=logs&duration=300&${query}`);
+      await page.setContent(`<h1>Workload: good-app</h1><button role="tab" aria-selected="true">Logs</button><button>${label}</button>${pause ? '<button>Pause</button>' : ''}<div role="log">APPLICATION ready</div>`);
+      await expect(assertWorkloadView(page, config, { serviceName: 'good-app', namespace: 'test', workload: 'good-app' }, 'logs', 900)).rejects.toThrow(error);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('does not relax the Overview range checks when fixing Logs', async () => {
+    const page = await context.newPage();
+    try {
+      await page.goto(`${config.kialiBaseUrl}/namespaces/test/workloads/good-app?tab=info&duration=1800&rangeDuration=300&refresh=0`);
+      await expect(assertWorkloadView(page, config, { serviceName: 'good-app', namespace: 'test', workload: 'good-app' }, 'info', 900)).rejects.toThrow('Overview time range');
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('fails clearly when the requested Logs period is not offered rather than substituting another range', async () => {
+    const page = await context.newPage();
+    try {
+      await expect(prepareWorkloadPage(page, config, { serviceName: 'range-reset', namespace: 'test', workload: 'range-reset' }, 'logs', 2220)).rejects.toThrow('does not offer the requested 2220-second Logs period');
+      expect(await page.getByRole('button', { name: 'Last 30m', exact: true }).isVisible()).toBe(true);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('captures Logs as normal evidence after correcting the range and processes the next service', async () => {
+    const services = ['range-reset', 'good-app'].map((name) => ({ serviceName: name, namespace: 'test', workload: name }));
+    const results = await collectServices(context, services, config, directory, 900, undefined, () => undefined);
+    expect(results.map((result) => result.result)).toEqual(['PASS', 'PASS']);
+    expect(results.map((result) => result.logsStatus)).toEqual(['CAPTURED', 'CAPTURED']);
+    expect(results[0]!.errorScreenshotPath).toBeUndefined();
+    expect(await readdir(path.join(directory, 'range-reset'))).toEqual(['01-overview.png', '02-logs.png']);
+  });
+
   it('waits for session bootstrap on each workload navigation instead of treating a temporary login heading as expiry', async () => {
     await context.route('**/namespaces/test/workloads/session-bootstrap?*', async (route) => {
       const tab = new URL(route.request().url()).searchParams.get('tab');

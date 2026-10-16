@@ -230,9 +230,18 @@ The utility navigates directly to:
 ```
 
 Overview uses `tab=info`, the configured overview duration in `duration` and
-`rangeDuration`, and `refresh=0`. Logs uses `tab=logs`, the selected log duration
+`rangeDuration`, and `refresh=0`. Logs navigation initially uses `tab=logs`, the selected log duration
 in both duration parameters, and `refresh=0`. For example, `--minutes 30` sets
 `rangeDuration=1800` and `duration=1800`. Parameter order does not matter.
+
+Kiali may restore a different Logs range from its time-control state. When that
+happens, the utility selects the requested period in the visible time-range
+menu and waits for the updated logs. It verifies `rangeDuration` and the visible
+range label before and after capture. The separate Overview `duration` value
+does not determine the Logs period. An omitted `refresh` parameter is accepted
+only when the toolbar explicitly shows `Pause`; a nonzero refresh value is
+rejected. An unavailable menu period or an unverified range still fails safely;
+the utility never substitutes a different duration to make the capture pass.
 
 Each tab waits for DOMContentLoaded, the workload identity, the requested tab,
 visible loading indicators to disappear, and the configured render delay.
@@ -365,7 +374,7 @@ in `finally` blocks. A forced OS termination cannot guarantee finalization.
 | TLS certificate validation failure | Use the approved corporate CA/trust configuration. Do not bypass TLS. |
 | Workload not found or access denied | Check exact CSV names and account permissions. No role or cluster changes are performed by this utility. |
 | Expected tab/workload or logs area absent | Rerun one service with `--headed --keep-temp`; inspect sanitized remarks and PNGs. The deployed Kiali markup may require selector adjustment. |
-| Wrong time range reported | Confirm your Kiali version accepts the required URL parameters. The tool refuses to save misleading evidence after a range rewrite. |
+| Wrong Logs period reported | Check the visible time-range menu and requested minutes. The tool selects the requested menu option when Kiali restores another period, but refuses unsupported options or an unverified resulting range. |
 | Empty logs or Max lines exceeded | Review the warning and visible evidence. The utility does not change log limits or export all logs. |
 | Output file in use or permission denied | Close it in Excel, check directory permissions, or omit `--overwrite` to write a new filename. |
 | Unexpected browser failure | Review sanitized Remarks, rerun one headed service, and check Chromium installation. Raw Playwright diagnostics are deliberately not printed. |
