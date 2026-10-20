@@ -1,7 +1,7 @@
 {
   "environment": "Production",
   "authenticationMode": "storageState",
-  "kialiBaseUrl": "https://kiali.prd.ausiex.com.au/kiali/console",
+  "kialiBaseUrl": "https://kiali.dev.ausiex.com.au/kiali/console",
   "overviewDurationSeconds": 300,
   "logsDurationSeconds": 86400,
   "pageTimeoutMilliseconds": 90000,
