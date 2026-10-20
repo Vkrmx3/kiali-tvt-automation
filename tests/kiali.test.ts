@@ -33,23 +33,56 @@ function fixtureHtml(workload: string, tab: string): string {
   if (workload === 'generic-error') content = '<div role="alert">Could not fetch Workload.</div>';
   if (tab === 'logs') {
     const matchingName = workload === 'ambiguous-container' ? 'different-app' : workload;
-    content = `<section id="logs"><label><input id="container-0" type="checkbox" checked>sidecar-proxy</label><label><input id="container-1" type="checkbox" checked>${matchingName}</label><div id="logsText" role="log">Loading fixture...</div></section>`;
+    controls = '<button id="metrics_filter_interval_duration" aria-label="metrics_filter_interval_duration">Custom</button><button>Pause</button>';
+    content = `<section id="logs"><label><input id="container-0" type="checkbox" checked>sidecar-proxy</label><label><input id="container-1" type="checkbox" checked>${matchingName}</label><button id="wpl_tailLines" aria-label="wpl_tailLines" aria-haspopup="listbox">3000 lines</button><ul id="line-options" role="listbox" hidden><li><button role="option" aria-label="-1" id="all-lines">All lines</button></li></ul><div id="logsText" role="log">Loading fixture...</div></section>`;
     if (workload === 'no-logs-area') content = '<p>Waiting for logs content.</p>';
     else if (workload === 'empty-logs') content = '<h2>No logs for Workload empty-logs</h2><p>There are no logs to display because the workload has no pods.</p>';
     else {
-      script = `fetch('/api/namespaces/test/pods/${workload}/logs').then(async response => {
-        if (response.ok) {
-          document.getElementById('logsText').textContent = await response.text();
-          const update = () => { document.getElementById('logsText').textContent = document.getElementById('container-0').checked ? 'APPLICATION ready\\nSIDECAR proxy debug' : 'APPLICATION ready\\napplication error preserved'; };
-          document.querySelectorAll('input[id^="container-"]').forEach(input => input.addEventListener('change', update));
-        }
-      });`;
+      script = `let allLines = false;
+        const loadLogs = async () => {
+          const area = document.getElementById('logsText');
+          area.setAttribute('aria-busy', 'true');
+          try {
+            const response = await fetch('/api/namespaces/test/pods/${workload}/logs?tailLines=' + (allLines ? '-1' : '3000') + '&sidecar=' + document.getElementById('container-0').checked);
+            if (response.ok) {
+              area.textContent = await response.text();
+              area.scrollTop = area.scrollHeight;
+              area.scrollLeft = 100;
+            }
+          } finally { area.removeAttribute('aria-busy'); }
+        };
+        document.querySelectorAll('input[id^="container-"]').forEach(input => input.addEventListener('change', loadLogs));
+        document.getElementById('wpl_tailLines').onclick = () => { document.getElementById('line-options').hidden = false; };
+        document.getElementById('all-lines').onclick = () => {
+          allLines = true;
+          document.getElementById('line-options').hidden = true;
+          setTimeout(() => {
+            document.getElementById('wpl_tailLines').textContent = 'All lines';
+            loadLogs();
+          }, 80);
+        };
+        loadLogs();`;
     }
     if (workload === 'max-lines') content += '<div role="alert">Max lines exceeded</div>';
     if (workload === 'cancelled-refresh') script = `const controller = new AbortController();
       fetch('/api/namespaces/test/pods/cancelled-refresh/logs?cancelled=true', {signal: controller.signal}).catch(() => undefined);
       setTimeout(() => controller.abort(), 30);
       ${script}`;
+    if (workload === 'active-refresh') {
+      controls = '<button id="metrics_filter_interval_duration">Custom</button><button id="metrics-refresh">Every 1m</button><ul id="refresh-options" role="listbox" hidden><li><button id="pause-refresh" role="option" aria-label="0">Pause</button></li></ul>';
+      script += `
+        const refreshSettings = new URLSearchParams(location.search);
+        refreshSettings.set('refresh', '60000');
+        history.replaceState(null, '', location.pathname + '?' + refreshSettings.toString());
+        document.getElementById('metrics-refresh').onclick = () => { document.getElementById('refresh-options').hidden = false; };
+        document.getElementById('pause-refresh').onclick = () => {
+          refreshSettings.set('refresh', '0');
+          history.replaceState(null, '', location.pathname + '?' + refreshSettings.toString());
+          document.getElementById('metrics-refresh').textContent = 'Pause';
+          document.getElementById('refresh-options').hidden = true;
+        };
+      `;
+    }
     if (workload === 'range-reset') {
       controls = '<button id="range-toggle" aria-haspopup="menu" aria-expanded="false">Last 30m</button><div id="range-options" role="menu" hidden><button role="menuitem" id="range-15">Last 15m</button></div><button>Pause</button>';
       script += `
@@ -100,7 +133,9 @@ beforeAll(async () => {
         response.end('Synthetic authentication failure');
       } else {
         response.writeHead(200, { 'Content-Type': 'text/plain' });
-        response.end('APPLICATION ready\nSIDECAR proxy debug');
+        const banner = url.searchParams.get('tailLines') === '-1' && !url.pathname.includes('/missing-banner/') ? '  .   ____          _\n /\\ / ___\'__ _ _(_)_ __\n :: Spring Boot :: (fixture)\n' : '';
+        const proxy = url.searchParams.get('sidecar') === 'true' ? 'SIDECAR proxy debug\n' : '';
+        response.end(banner + 'APPLICATION ready\napplication error preserved\n' + proxy + Array.from({ length: 80 }, (_, index) => `Application entry ${index}`).join('\n'));
       }
       return;
     }
@@ -156,41 +191,108 @@ async function collect(names: string[]): Promise<ServiceResult[]> {
 }
 
 describe('real Chromium, loopback Kiali fixtures only', () => {
-  it('selects the requested log period when Kiali resets it and normalizes unrelated URL parameters', async () => {
+  it('pauses a restored refresh setting before taking startup evidence', async () => {
+    const [result] = await collect(['active-refresh']);
+    expect(result!.result).toBe('PASS');
+    expect(result!.logsStatus).toBe('CAPTURED');
+  });
+
+  it.each(['missing-banner', 'banner-below-top'])('does not claim startup evidence when the Spring banner is absent or off-screen: %s', async (workload) => {
+    if (workload === 'banner-below-top') {
+      await context.route('**/api/namespaces/test/pods/banner-below-top/logs?*', (route) => route.fulfill({
+        contentType: 'text/plain', body: 'Earlier application log\n'.repeat(100) + ':: Spring Boot ::',
+      }));
+    }
+    const results = await collect([workload, 'good-app']);
+    expect(results.map((result) => result.result)).toEqual(['FAILED', 'PASS']);
+    expect(results[0]!.overviewStatus).toBe('CAPTURED');
+    expect(results[0]!.logsScreenshotPath).toBeUndefined();
+    expect(results[0]!.remarks.join(' ')).toContain('Spring Boot banner is not visible');
+  });
+
+  it.each(['proxy', 'lines', 'scroll', 'window'])('rechecks Logs controls and pinned bounds before capture: %s', async (changed) => {
     const page = await context.newPage();
+    const end = Date.now();
+    const service = { serviceName: 'good-app', namespace: 'test', workload: 'good-app' };
     try {
-      const notes = await prepareWorkloadPage(page, config, { serviceName: 'range-reset', namespace: 'test', workload: 'range-reset' }, 'logs', 900);
-      expect(notes).toEqual([]);
-      expect(await page.getByRole('button', { name: 'Last 15m', exact: true }).isVisible()).toBe(true);
-      expect(new URL(page.url()).searchParams.get('rangeDuration')).toBe('900');
-      expect(await page.locator('#logsText').innerText()).toContain('selected 15 minutes');
+      await prepareWorkloadPage(page, config, service, 'logs', 86400, end);
+      if (changed === 'proxy') await page.getByRole('checkbox', { name: 'sidecar-proxy', exact: true }).check();
+      if (changed === 'lines') await page.locator('#wpl_tailLines').evaluate((element) => { element.textContent = '3000 lines'; });
+      if (changed === 'scroll') await page.locator('#logsText').evaluate((element) => { element.scrollTop = element.scrollHeight; });
+      if (changed === 'window') await page.evaluate(() => {
+        const url = new URL(location.href);
+        url.searchParams.set('from', String(Number(url.searchParams.get('from')) + 1000));
+        url.searchParams.set('to', String(Number(url.searchParams.get('to')) + 1000));
+        history.replaceState(null, '', url.pathname + url.search);
+      });
+      const failures = { proxy: 'proxy container', lines: 'All lines', scroll: 'top-left', window: 'custom 86400-second' };
+      await expect(assertWorkloadView(page, config, service, 'logs', 86400, end)).rejects.toThrow(failures[changed as keyof typeof failures]);
     } finally {
       await page.close();
     }
   });
 
-  it.each(['Last 60m', 'Last 1h', 'Last 1 hour'])('verifies the effective Logs period with toolbar label %s independently of Overview duration', async (label) => {
+  it('uses identical custom bounds for the Logs retry and every service in the run', async () => {
+    const windows: string[] = [];
+    context.on('request', (request) => {
+      const url = new URL(request.url());
+      if (request.isNavigationRequest() && url.searchParams.get('tab') === 'logs') {
+        windows.push(JSON.stringify([url.searchParams.get('from'), url.searchParams.get('to')]));
+      }
+    });
+    let logNavigations = 0;
+    await context.route('**/namespaces/test/workloads/window-retry?*', async (route) => {
+      const tab = new URL(route.request().url()).searchParams.get('tab') ?? 'info';
+      if (tab === 'logs' && ++logNavigations === 1) await route.fulfill({ status: 302, headers: { location: '/login' } });
+      else await route.fulfill({ contentType: 'text/html', body: fixtureHtml('window-retry', tab) });
+    });
+    const services = ['window-retry', 'good-app'].map((name) => ({ serviceName: name, namespace: 'test', workload: name }));
+    const results = await collectServices(context, services, config, directory, 86400, undefined, () => undefined);
+    expect(results.map((result) => result.result)).toEqual(['PASS WITH WARNING', 'PASS']);
+    expect(windows).toHaveLength(3);
+    expect(new Set(windows).size).toBe(1);
+    const [from, to] = JSON.parse(windows[0]!) as [string, string];
+    expect(Number(to) - Number(from)).toBe(86400000);
+  });
+
+  it('opens a one-day Custom Logs window without relying on preset menu options', async () => {
     const page = await context.newPage();
     try {
-      await page.goto(`${config.kialiBaseUrl}/namespaces/test/workloads/good-app?tab=logs&duration=300&rangeDuration=3600&refresh=0`);
-      await page.setContent(`<h1>Workload: good-app</h1><button role="tab" aria-selected="true">Logs</button><button>${label}</button><div role="log">APPLICATION ready</div>`);
-      await expect(assertWorkloadView(page, config, { serviceName: 'good-app', namespace: 'test', workload: 'good-app' }, 'logs', 3600)).resolves.toBeUndefined();
+      const end = Date.now();
+      const notes = await prepareWorkloadPage(page, config, { serviceName: 'good-app', namespace: 'test', workload: 'good-app' }, 'logs', 86400, end);
+      expect(notes).toEqual([]);
+      const url = new URL(page.url());
+      expect(url.searchParams.get('to')).toBe(String(end));
+      expect(url.searchParams.get('from')).toBe(String(end - 86400000));
+      expect(url.searchParams.has('rangeDuration')).toBe(false);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('verifies a custom Logs window independently of Overview duration', async () => {
+    const page = await context.newPage();
+    try {
+      const end = Date.now();
+      await page.goto(`${config.kialiBaseUrl}/namespaces/test/workloads/good-app?tab=logs&duration=300&from=${end - 86400000}&to=${end}&refresh=0`);
+      await page.setContent('<h1>Workload: good-app</h1><button role="tab" aria-selected="true">Logs</button><button>Custom</button><button id="wpl_tailLines">All lines</button><div role="log">:: Spring Boot :: APPLICATION ready</div>');
+      await expect(assertWorkloadView(page, config, { serviceName: 'good-app', namespace: 'test', workload: 'good-app' }, 'logs', 86400, end)).resolves.toBeUndefined();
     } finally {
       await page.close();
     }
   });
 
   it.each([
-    { query: 'rangeDuration=1800&refresh=0', label: 'Last 30m', pause: true, error: 'Requested Logs period' },
-    { query: 'rangeDuration=900&refresh=0', label: 'Last 30m', pause: true, error: 'Requested Logs period' },
-    { query: 'rangeDuration=900&refresh=30', label: 'Last 15m', pause: false, error: 'automatic refresh' },
-    { query: 'rangeDuration=900', label: 'Last 15m', pause: false, error: 'automatic refresh' },
+    { query: 'from=1700000000000&to=1700001800000&refresh=0', label: 'Custom', pause: true, error: 'custom 86400-second' },
+    { query: 'from=1700000000000&to=1700086400000&refresh=0', label: 'Last 30m', pause: true, error: 'custom 86400-second' },
+    { query: 'from=1700000000000&to=1700086400000&refresh=30', label: 'Custom', pause: false, error: 'automatic refresh' },
+    { query: 'from=1700000000000&to=1700086400000', label: 'Custom', pause: false, error: 'automatic refresh' },
   ])('rejects a wrong Logs range or unverified refresh setting: $query / $label', async ({ query, label, pause, error }) => {
     const page = await context.newPage();
     try {
       await page.goto(`${config.kialiBaseUrl}/namespaces/test/workloads/good-app?tab=logs&duration=300&${query}`);
       await page.setContent(`<h1>Workload: good-app</h1><button role="tab" aria-selected="true">Logs</button><button>${label}</button>${pause ? '<button>Pause</button>' : ''}<div role="log">APPLICATION ready</div>`);
-      await expect(assertWorkloadView(page, config, { serviceName: 'good-app', namespace: 'test', workload: 'good-app' }, 'logs', 900)).rejects.toThrow(error);
+      await expect(assertWorkloadView(page, config, { serviceName: 'good-app', namespace: 'test', workload: 'good-app' }, 'logs', 86400)).rejects.toThrow(error);
     } finally {
       await page.close();
     }
@@ -206,29 +308,29 @@ describe('real Chromium, loopback Kiali fixtures only', () => {
     }
   });
 
-  it('fails clearly when the requested Logs period is not offered rather than substituting another range', async () => {
+  it('rejects Kiali replacing the custom window with a preset rather than capturing a different period', async () => {
     const page = await context.newPage();
     try {
-      await expect(prepareWorkloadPage(page, config, { serviceName: 'range-reset', namespace: 'test', workload: 'range-reset' }, 'logs', 2220)).rejects.toThrow('does not offer the requested 2220-second Logs period');
+      await expect(prepareWorkloadPage(page, config, { serviceName: 'range-reset', namespace: 'test', workload: 'range-reset' }, 'logs', 86400)).rejects.toThrow('custom 86400-second Logs window');
       expect(await page.getByRole('button', { name: 'Last 30m', exact: true }).isVisible()).toBe(true);
     } finally {
       await page.close();
     }
   });
 
-  it('captures Logs as normal evidence after correcting the range and processes the next service', async () => {
-    const services = ['range-reset', 'good-app'].map((name) => ({ serviceName: name, namespace: 'test', workload: name }));
-    const results = await collectServices(context, services, config, directory, 900, undefined, () => undefined);
+  it('captures custom Logs windows and processes the next service', async () => {
+    const services = ['custom-app', 'good-app'].map((name) => ({ serviceName: name, namespace: 'test', workload: name }));
+    const results = await collectServices(context, services, config, directory, 86400, undefined, () => undefined);
     expect(results.map((result) => result.result)).toEqual(['PASS', 'PASS']);
     expect(results.map((result) => result.logsStatus)).toEqual(['CAPTURED', 'CAPTURED']);
     expect(results[0]!.errorScreenshotPath).toBeUndefined();
-    expect(await readdir(path.join(directory, 'range-reset'))).toEqual(['01-overview.png', '02-logs.png']);
+    expect(await readdir(path.join(directory, 'custom-app'))).toEqual(['01-overview.png', '02-logs.png']);
   });
 
   it('waits for session bootstrap on each workload navigation instead of treating a temporary login heading as expiry', async () => {
     await context.route('**/namespaces/test/workloads/session-bootstrap?*', async (route) => {
       const tab = new URL(route.request().url()).searchParams.get('tab');
-      const content = `<h1>Workload: session-bootstrap</h1><div role="tablist"><button role="tab" aria-selected="${tab === 'info'}">Overview</button><button role="tab" aria-selected="${tab === 'logs'}">Logs</button></div><label><input type="checkbox" id="container-0" checked>session-bootstrap</label><div id="logsText" role="log">APPLICATION ready</div>`;
+      const content = `<h1>Workload: session-bootstrap</h1><div role="tablist"><button role="tab" aria-selected="${tab === 'info'}">Overview</button><button role="tab" aria-selected="${tab === 'logs'}">Logs</button></div><label><input type="checkbox" id="container-0" checked>session-bootstrap</label><button id="wpl_tailLines">All lines</button><div id="logsText" role="log">:: Spring Boot :: APPLICATION ready</div>`;
       await route.fulfill({
         contentType: 'text/html',
         body: `<h1>Log in</h1><script>setTimeout(() => { document.body.innerHTML = ${JSON.stringify(content)}; }, 350);</script>`,
@@ -332,8 +434,12 @@ describe('real Chromium, loopback Kiali fixtures only', () => {
       expect(notes).toEqual([]);
       expect(await page.getByRole('checkbox', { name: 'good-app', exact: true }).isChecked()).toBe(true);
       expect(await page.getByRole('checkbox', { name: 'sidecar-proxy', exact: true }).isChecked()).toBe(false);
+      expect(await page.locator('#wpl_tailLines').innerText()).toBe('All lines');
+      expect(await page.locator('#logsText').evaluate((element) => [element.scrollTop, element.scrollLeft])).toEqual([0, 0]);
+      expect(await page.locator('#logsText').innerText()).toContain(':: Spring Boot ::');
       expect(await page.locator('#logsText').innerText()).toContain('application error preserved');
-      expect(new URL(page.url()).searchParams.get('rangeDuration')).toBe('1800');
+      const url = new URL(page.url());
+      expect(Number(url.searchParams.get('to')) - Number(url.searchParams.get('from'))).toBe(1800000);
       const mutation = await page.evaluate(async () => {
         try { await fetch('/api/never-mutate', { method: 'POST', body: '{}' }); return 'allowed'; }
         catch { return 'blocked'; }
@@ -415,9 +521,9 @@ describe('real Chromium, loopback Kiali fixtures only', () => {
     expect(results[0]!.remarks.join(' ')).toContain('HTTP 503');
   });
 
-  it('records empty logs and ambiguous containers as non-fatal warnings', async () => {
+  it('fails empty startup logs but preserves a non-fatal note for an ambiguous application container', async () => {
     const results = await collect(['empty-logs', 'ambiguous-container']);
-    expect(results.map((result) => result.result)).toEqual(['PASS WITH WARNING', 'PASS WITH WARNING']);
+    expect(results.map((result) => result.result)).toEqual(['FAILED', 'PASS WITH WARNING']);
     expect(results[0]!.remarks.join(' ')).toContain('no logs');
     expect(results[1]!.remarks.join(' ')).toContain('preserved the default');
   });

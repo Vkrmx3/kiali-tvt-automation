@@ -52,11 +52,27 @@ describe('direct workload URLs', () => {
     expect(Object.fromEntries(url.searchParams)).toEqual({ tab: 'info', duration: '300', refresh: '0', rangeDuration: '300' });
   });
 
-  it('uses 15 minutes by default and overrides both logs durations', () => {
-    const defaultUrl = new URL(workloadUrl(config, service, 'logs'));
-    expect(defaultUrl.searchParams.get('rangeDuration')).toBe('900');
-    const overridden = new URL(workloadUrl(config, service, 'logs', 1800));
-    expect(Object.fromEntries(overridden.searchParams)).toEqual({ tab: 'logs', duration: '1800', refresh: '0', rangeDuration: '1800' });
+  it('uses a fixed one-day custom Logs window without a preset range parameter', () => {
+    const end = Date.UTC(2026, 9, 16, 12, 0);
+    const url = new URL(workloadUrl(config, service, 'logs', 86400, end));
+    expect(Object.fromEntries(url.searchParams)).toEqual({
+      tab: 'logs', duration: '300', refresh: '0',
+      from: String(end - 86400000), to: String(end),
+    });
+    expect(url.searchParams.has('rangeDuration')).toBe(false);
+  });
+
+  it('preserves an explicit minutes override as an exact custom window', () => {
+    const end = Date.UTC(2026, 9, 16, 12, 0);
+    const url = new URL(workloadUrl(config, service, 'logs', 1800, end));
+    expect(Number(url.searchParams.get('to')) - Number(url.searchParams.get('from'))).toBe(1800000);
+    expect(new URL(workloadUrl(config, service, 'logs', 1800, end)).href).toBe(url.href);
+  });
+
+  it('uses an elapsed 24 hours even across Sydney daylight saving changes', () => {
+    const end = Date.parse('2026-10-04T04:00:00+11:00');
+    const url = new URL(workloadUrl(config, service, 'logs', 86400, end));
+    expect(Number(url.searchParams.get('to')) - Number(url.searchParams.get('from'))).toBe(86400000);
   });
 
   it('rejects path normalization segments', () => {

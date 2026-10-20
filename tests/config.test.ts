@@ -17,7 +17,7 @@ describe('configuration', () => {
   it('reads settings with one base URL override', () => {
     const parsed = parseConfig(settings, 'https://example.invalid/kiali/console/');
     expect(parsed.kialiBaseUrl).toBe('https://example.invalid/kiali/console');
-    expect(parsed.logsDurationSeconds).toBe(900);
+    expect(parsed.logsDurationSeconds).toBe(86400);
     expect(parsed.viewportWidth).toBe(1920);
   });
 
