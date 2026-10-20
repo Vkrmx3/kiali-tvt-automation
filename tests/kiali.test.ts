@@ -191,6 +191,37 @@ async function collect(names: string[]): Promise<ServiceResult[]> {
 }
 
 describe('real Chromium, loopback Kiali fixtures only', () => {
+  it.each(['inner', 'wrapper'])('scrolls the actual %s log viewport without scrolling unrelated panels', async (layout) => {
+    const page = await context.newPage();
+    const end = Date.now();
+    const service = { serviceName: 'nested-scroll', namespace: 'test', workload: 'nested-scroll' };
+    const content = ':: Spring Boot :: (fixture)\n' + 'Application log entry with a long horizontal line '.repeat(45) + '\n' + 'Application log entry\n'.repeat(80);
+    const logMarkup = layout === 'inner'
+      ? `<div id="logsText" role="log"><div id="actual-log-viewport"><pre>${content}</pre></div></div>`
+      : `<div id="actual-log-viewport"><pre id="logsText" role="log">${content}</pre></div>`;
+    await context.route('**/namespaces/test/workloads/nested-scroll?*', (route) => route.fulfill({
+      contentType: 'text/html',
+      body: `<style>body{margin:20px}#actual-log-viewport{height:320px;width:800px;overflow:auto}pre{margin:0;font:14px/20px monospace}#unrelated-panel{height:40px;width:100px;overflow:auto}</style>
+        <main><h1>Workload: nested-scroll</h1><button role="tab" aria-selected="true">Logs</button><button>Custom</button><button>Pause</button>
+        <label><input id="container-0" type="checkbox" checked>nested-scroll</label><button id="wpl_tailLines">All lines</button>${logMarkup}</main>
+        <aside id="unrelated-panel"><div style="height:500px">Unrelated panel</div></aside>
+        <script>const pane = document.getElementById('actual-log-viewport'); pane.scrollTop = pane.scrollHeight; pane.scrollLeft = 300; document.getElementById('unrelated-panel').scrollTop = 200;</script>`,
+    }));
+    try {
+      await prepareWorkloadPage(page, config, service, 'logs', 86400, end);
+      expect(await page.locator('#actual-log-viewport').evaluate((element) => [element.scrollTop, element.scrollLeft])).toEqual([0, 0]);
+      expect(await page.locator('#unrelated-panel').evaluate((element) => element.scrollTop)).toBe(200);
+      await expect(assertWorkloadView(page, config, service, 'logs', 86400, end)).resolves.toBeUndefined();
+      const screenshot = path.join(directory, `nested-${layout}.png`);
+      await captureScreenshot(page, config, screenshot, 'logs', () => assertWorkloadView(page, config, service, 'logs', 86400, end));
+      expect(PNG.sync.read(await readFile(screenshot)).height).toBe(1080);
+      await page.locator('#actual-log-viewport').evaluate((element) => { element.scrollTop = element.scrollHeight; });
+      await expect(assertWorkloadView(page, config, service, 'logs', 86400, end)).rejects.toThrow('top-left');
+    } finally {
+      await page.close();
+    }
+  });
+
   it('pauses a restored refresh setting before taking startup evidence', async () => {
     const [result] = await collect(['active-refresh']);
     expect(result!.result).toBe('PASS');
