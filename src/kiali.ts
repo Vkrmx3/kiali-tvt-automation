@@ -6,13 +6,22 @@ export type KialiTab = 'info' | 'logs';
 
 const LOG_AREA_SELECTOR = '#logsText, [role="log"], [data-testid="log-viewer"], [data-testid="logs-content"], [data-test="logs-content"], pre';
 
-export function workloadUrl(config: AppConfig, service: Service, tab: KialiTab, logsDurationSeconds = config.logsDurationSeconds): string {
+export function workloadUrl(config: AppConfig, service: Service, tab: KialiTab, logsDurationSeconds = config.logsDurationSeconds, logsToMilliseconds = Date.now()): string {
   if ([service.namespace, service.workload].some((value) => value === '.' || value === '..' || !value)) {
     throw new TvtError('URL', 'Namespace and workload must be non-empty, non-relative URL segments.');
   }
   const url = new URL(`${config.kialiBaseUrl}/namespaces/${encodeURIComponent(service.namespace)}/workloads/${encodeURIComponent(service.workload)}`);
-  const duration = tab === 'info' ? config.overviewDurationSeconds : logsDurationSeconds;
-  url.search = new URLSearchParams({ tab, duration: String(duration), refresh: '0', rangeDuration: String(duration) }).toString();
+  const parameters = new URLSearchParams({ tab, duration: String(config.overviewDurationSeconds), refresh: '0' });
+  if (tab === 'logs') {
+    if (!Number.isSafeInteger(logsToMilliseconds) || !Number.isInteger(logsDurationSeconds) || logsDurationSeconds < 60 || logsDurationSeconds > 86400) {
+      throw new TvtError('URL', 'Logs must use a valid millisecond timestamp and a period between 60 and 86400 seconds.');
+    }
+    parameters.set('from', String(logsToMilliseconds - logsDurationSeconds * 1000));
+    parameters.set('to', String(logsToMilliseconds));
+  } else {
+    parameters.set('rangeDuration', String(config.overviewDurationSeconds));
+  }
+  url.search = parameters.toString();
   return url.href;
 }
 
@@ -209,57 +218,15 @@ function logRangeControl(page: Page): Locator {
     .filter({ visible: true });
 }
 
-async function logRangeState(page: Page): Promise<{ controls: number; seconds: number | undefined }> {
-  const labels = await logRangeControl(page).allTextContents();
-  const match = labels.length === 1 ? labels[0]!.trim().match(relativeRangeLabel) : null;
-  const multipliers: Record<string, number> = { s: 1, m: 60, h: 3600, d: 86400 };
-  const seconds = match ? Number(match[1]) * multipliers[match[2]![0]!.toLowerCase()]! : undefined;
-  return { controls: labels.length, seconds };
-}
-
-function requestedRangeLabel(seconds: number): RegExp {
-  const units: Array<[number, string]> = [
-    [1, 's(?:ec(?:ond)?s?)?'], [60, 'm(?:in(?:ute)?s?)?'],
-    [3600, '(?:h|hrs?|hours?)'], [86400, 'd(?:ays?)?'],
-  ];
-  const alternatives = units.filter(([divisor]) => seconds % divisor === 0)
-    .map(([divisor, label]) => `${seconds / divisor}\\s*${label}`);
-  return new RegExp(`^Last\\s+(?:${alternatives.join('|')})$`, 'i');
-}
-
-async function selectRequestedLogRange(page: Page, config: AppConfig, seconds: number): Promise<void> {
-  const state = await logRangeState(page);
-  const queryMatches = new URL(page.url()).searchParams.get('rangeDuration') === String(seconds);
-  if (queryMatches && (state.seconds === seconds || state.controls === 0)) return;
-  if (state.controls !== 1) {
-    throw new TvtError('LOG_RANGE_CONTROL', `Cannot identify a unique time-range control to select the requested ${seconds}-second Logs period.`);
-  }
-  const timeout = Math.min(config.pageTimeoutMilliseconds, 5000);
-  const control = logRangeControl(page);
-  await control.click({ timeout });
-  try {
-    const name = requestedRangeLabel(seconds);
-    const option = page.getByRole('menuitem', { name }).or(page.getByRole('option', { name }))
-      .or(page.getByRole('menuitemradio', { name })).filter({ visible: true });
-    try {
-      await option.first().waitFor({ state: 'visible', timeout });
-    } catch {
-      throw new TvtError('LOG_RANGE_UNSUPPORTED', `Kiali does not offer the requested ${seconds}-second Logs period in the time-range menu. No alternative period was substituted.`);
-    }
-    if (await option.count() !== 1) throw new TvtError('LOG_RANGE_CONTROL', 'The requested Logs period has ambiguous menu options.');
-    await option.click({ timeout });
-  } finally {
-    await page.keyboard.press('Escape').catch(() => undefined);
-  }
-}
-
-async function assertLogRange(page: Page, seconds: number): Promise<void> {
+async function assertLogRange(page: Page, seconds: number, expectedToMilliseconds?: number): Promise<void> {
   const actual = new URL(page.url());
-  const state = await logRangeState(page);
-  if (actual.searchParams.get('rangeDuration') !== String(seconds) ||
-      state.controls > 0 && (state.controls !== 1 || state.seconds !== seconds)) {
-    const observed = state.seconds === undefined ? 'not confirmed by the toolbar' : `${state.seconds} seconds in the toolbar`;
-    throw new TvtError('WRONG_PERIOD', `Requested Logs period is ${seconds} seconds; actual period is ${observed}. Capture was stopped.`);
+  const from = Number(actual.searchParams.get('from'));
+  const to = Number(actual.searchParams.get('to'));
+  const labels = await logRangeControl(page).allTextContents();
+  if (!Number.isSafeInteger(from) || !Number.isSafeInteger(to) || from <= 0 || to - from !== seconds * 1000 ||
+      expectedToMilliseconds !== undefined && to !== expectedToMilliseconds || actual.searchParams.has('rangeDuration') ||
+      labels.length > 1 || labels.length === 1 && labels[0]!.trim().toLowerCase() !== 'custom') {
+    throw new TvtError('WRONG_PERIOD', `The requested custom ${seconds}-second Logs window was not preserved. Capture was stopped.`);
   }
   const refresh = actual.searchParams.get('refresh');
   if (refresh !== '0' && !(refresh === null && await visible(page.getByRole('button', { name: 'Pause', exact: true })))) {
@@ -267,7 +234,7 @@ async function assertLogRange(page: Page, seconds: number): Promise<void> {
   }
 }
 
-export async function assertWorkloadView(page: Page, config: AppConfig, service: Service, tab: KialiTab, logsDurationSeconds: number): Promise<void> {
+export async function assertWorkloadView(page: Page, config: AppConfig, service: Service, tab: KialiTab, logsDurationSeconds: number, logsToMilliseconds?: number): Promise<void> {
   await assertHealthy(page, config);
   const expected = new URL(workloadUrl(config, service, tab, logsDurationSeconds));
   const actual = new URL(page.url());
@@ -275,7 +242,7 @@ export async function assertWorkloadView(page: Page, config: AppConfig, service:
     throw new TvtError('WRONG_PAGE', 'The browser is not on the requested workload and tab. No evidence was saved.');
   }
   if (tab === 'logs') {
-    await assertLogRange(page, logsDurationSeconds);
+    await assertLogRange(page, logsDurationSeconds, logsToMilliseconds);
   } else {
     for (const key of ['duration', 'rangeDuration', 'refresh']) {
       if (actual.searchParams.get(key) !== expected.searchParams.get(key)) {
@@ -286,10 +253,115 @@ export async function assertWorkloadView(page: Page, config: AppConfig, service:
   if (!(await workloadVisible(page, service))) throw new TvtError('WORKLOAD_ABSENT', 'Expected workload name is not visible.');
   if (!(await tabVisible(page, tab))) throw new TvtError('TAB_ABSENT', 'The requested workload tab is not selected or visible.');
   if (tab === 'logs' && !(await logsVisible(page))) throw new TvtError('LOGS_ABSENT', 'The logs area never loaded.');
+  if (tab === 'logs') await assertLogPresentation(page);
 }
 
 const sidecarName = /^(?:sidecar-proxy|istio-proxy|linkerd-proxy)$/i;
-const uncertainContainer = 'Application container could not be confidently selected; preserved the default container view.';
+const uncertainContainer = 'Application container could not be confidently selected; preserved the default application-container selection.';
+
+function proxyCheckboxes(page: Page): Locator {
+  return page.getByRole('checkbox', { name: sidecarName }).filter({ visible: true });
+}
+
+function linesControl(page: Page): Locator {
+  return page.locator('button[id^="wpl_tailLines"], select[id^="wpl_tailLines"], [id="wpl_tailLines"] button')
+    .or(page.getByRole('button', { name: /^(?:\d+ lines|All lines)$/i }))
+    .or(page.getByRole('combobox', { name: /^(?:wpl_tailLines|log lines|line limit)$/i }))
+    .filter({ visible: true });
+}
+
+async function controlText(control: Locator): Promise<string | undefined> {
+  const values = await control.evaluateAll((elements) => elements.map((element) => element instanceof HTMLSelectElement
+    ? element.selectedOptions[0]?.textContent?.trim() : element.textContent?.trim()));
+  return values.length === 1 ? values[0] : undefined;
+}
+
+async function selectDisplayOption(page: Page, control: Locator, label: RegExp, value: string, config: AppConfig): Promise<void> {
+  if (await control.count() !== 1) throw new TvtError('LOG_CONTROL', 'A required Logs display control is missing or ambiguous.');
+  const timeout = Math.min(config.pageTimeoutMilliseconds, 5000);
+  if (await control.evaluate((element) => element.tagName === 'SELECT')) {
+    await control.selectOption(value, { timeout });
+    return;
+  }
+  await control.click({ timeout });
+  try {
+    const options = page.getByRole('option').or(page.getByRole('menuitem')).or(page.getByRole('menuitemradio'))
+      .filter({ hasText: label, visible: true });
+    const buttons = page.getByRole('button').or(page.getByRole('link')).filter({ hasText: label, visible: true });
+    await options.or(buttons).first().waitFor({ state: 'visible', timeout });
+    const target = await options.count() ? options : buttons;
+    if (await target.count() !== 1) throw new TvtError('LOG_CONTROL', 'A required Logs display option is ambiguous.');
+    await target.click({ timeout });
+  } finally {
+    await page.keyboard.press('Escape').catch(() => undefined);
+  }
+}
+
+async function pauseLogRefresh(page: Page, config: AppConfig): Promise<void> {
+  const control = page.locator('button[id^="metrics-refresh"], [id="metrics-refresh"] button')
+    .or(page.getByRole('button', { name: /^(?:Pause|Every\s+\d+\s*\w+)$/i })).filter({ visible: true });
+  const label = await controlText(control);
+  if (new URL(page.url()).searchParams.get('refresh') === '0' && (!label || /^Pause$/i.test(label))) return;
+  if (new URL(page.url()).searchParams.get('refresh') === null && label === 'Pause') return;
+  await selectDisplayOption(page, control, /^Pause$/i, '0', config);
+}
+
+async function selectAllLogLines(page: Page, config: AppConfig): Promise<void> {
+  const control = linesControl(page);
+  if (/^All lines$/i.test(await controlText(control) ?? '')) return;
+  try {
+    await selectDisplayOption(page, control, /^All lines$/i, '-1', config);
+  } catch {
+    await assertAuthenticated(page, config);
+    throw new TvtError('LOG_LINES', 'Unable to select All lines in the Logs line-count control. Capture was stopped.');
+  }
+}
+
+async function springBannerVisible(area: Locator): Promise<boolean> {
+  return area.evaluate((element) => {
+    const boundary = element.getBoundingClientRect();
+    const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+    let node = walker.nextNode();
+    while (node) {
+      const match = /::\s*Spring Boot\s*::/i.exec(node.textContent ?? '');
+      if (match) {
+        const range = document.createRange();
+        range.setStart(node, match.index);
+        range.setEnd(node, match.index + match[0].length);
+        const bounds = range.getBoundingClientRect();
+        if (bounds.width > 0 && bounds.height > 0 && bounds.top >= Math.max(0, boundary.top) &&
+            bounds.bottom <= Math.min(window.innerHeight, boundary.bottom) && bounds.left >= Math.max(0, boundary.left) &&
+            bounds.right <= Math.min(window.innerWidth, boundary.right)) return true;
+      }
+      node = walker.nextNode();
+    }
+    return false;
+  });
+}
+
+async function assertLogPresentation(page: Page): Promise<void> {
+  if (await proxyCheckboxes(page).evaluateAll((elements) => elements.some((element) => (element as HTMLInputElement).checked))) {
+    throw new TvtError('LOG_PROXY', 'A proxy container is still selected. Capture was stopped.');
+  }
+  if (!/^All lines$/i.test(await controlText(linesControl(page)) ?? '')) {
+    throw new TvtError('LOG_LINES', 'The Logs line-count control is not set to All lines. Capture was stopped.');
+  }
+  const area = logArea(page).filter({ visible: true }).first();
+  if (!(await area.isVisible()) || !(await area.evaluate((element) => element.scrollTop <= 1 && element.scrollLeft <= 1))) {
+    throw new TvtError('LOG_SCROLL', 'The log window is not at its top-left position. Capture was stopped.');
+  }
+  if (!(await springBannerVisible(area))) {
+    throw new TvtError('SPRING_BANNER', 'Spring Boot banner is not visible at the top of the selected log window. Startup may be outside this window, logs may have rotated, or the application may not emit the banner.');
+  }
+}
+
+async function positionLogsAtTop(page: Page): Promise<void> {
+  const area = logArea(page).filter({ visible: true }).first();
+  await area.scrollIntoViewIfNeeded();
+  await area.evaluate((element) => { element.scrollTop = 0; element.scrollLeft = 0; });
+  await page.waitForTimeout(100);
+  await assertLogPresentation(page);
+}
 
 async function chooseContainer(page: Page, service: Service, config: AppConfig): Promise<string[]> {
   if (sidecarName.test(service.workload)) return [uncertainContainer];
@@ -338,13 +410,13 @@ async function chooseContainer(page: Page, service: Service, config: AppConfig):
   }
 }
 
-export async function prepareWorkloadPage(page: Page, config: AppConfig, service: Service, tab: KialiTab, logsDurationSeconds: number): Promise<string[]> {
+export async function prepareWorkloadPage(page: Page, config: AppConfig, service: Service, tab: KialiTab, logsDurationSeconds: number, logsToMilliseconds = Date.now()): Promise<string[]> {
   const signals = observeRequests(page, config);
   const notes: string[] = [];
   page.setDefaultTimeout(config.pageTimeoutMilliseconds);
   try {
     let response;
-    const destination = workloadUrl(config, service, tab, logsDurationSeconds);
+    const destination = workloadUrl(config, service, tab, logsDurationSeconds, logsToMilliseconds);
     logDiagnosticUrl(destination, 'Target');
     try {
       response = await page.goto(destination, {
@@ -362,29 +434,28 @@ export async function prepareWorkloadPage(page: Page, config: AppConfig, service
     const ready = async (): Promise<boolean> => !(await visible(loadingIndicators(page))) &&
       (tab !== 'logs' || signals.pendingLogs.size === 0 && await logsVisible(page));
     await waitUntil(page, config, signals, ready, tab === 'logs' ? 'The logs area never finished loading.' : 'Workload loading indicators did not disappear.');
-    if (tab === 'logs' && !(await visible(emptyLogs(page)))) {
+    if (tab === 'logs') {
+      await pauseLogRefresh(page, config);
+      await assertLogRange(page, logsDurationSeconds, logsToMilliseconds);
+      if (await visible(emptyLogs(page))) throw new TvtError('NO_LOGS', 'Kiali reports no logs in the selected window; the Spring Boot banner cannot be verified.');
+      for (const checkbox of await proxyCheckboxes(page).all()) {
+        await checkbox.uncheck({ timeout: Math.min(config.pageTimeoutMilliseconds, 5000) });
+      }
       notes.push(...await chooseContainer(page, service, config));
     }
     await waitUntil(page, config, signals, ready, 'The workload view did not finish rendering after container selection.');
     if (tab === 'logs') {
-      await selectRequestedLogRange(page, config, logsDurationSeconds);
-      await waitUntil(page, config, signals, async () => {
-        const range = await logRangeState(page);
-        return new URL(page.url()).searchParams.get('rangeDuration') === String(logsDurationSeconds) &&
-          (range.controls === 0 || range.controls === 1 && range.seconds === logsDurationSeconds) && await ready();
-      }, 'The requested Logs period did not finish applying or its log data did not finish loading.');
+      await selectAllLogLines(page, config);
+      await waitUntil(page, config, signals, async () => /^All lines$/i.test(await controlText(linesControl(page)) ?? '') && await ready(),
+        'All lines was not retained or the resulting logs did not finish loading.');
     }
     if (config.renderWaitMilliseconds) await page.waitForTimeout(config.renderWaitMilliseconds);
     await waitUntil(page, config, signals, ready, 'The workload view did not stabilize before capture.');
-    await assertWorkloadView(page, config, service, tab, logsDurationSeconds);
+    if (tab === 'logs') await positionLogsAtTop(page);
+    await assertWorkloadView(page, config, service, tab, logsDurationSeconds, logsToMilliseconds);
     if (tab === 'logs') {
       if (await visible(page.getByText(/Max lines exceeded/i))) notes.push('Max lines exceeded: the logs view is truncated.');
       if (await visible(emptyLogs(page))) notes.push('Kiali reports no logs for this workload or the selected time period.');
-      const area = logArea(page).filter({ visible: true }).first();
-      if (await area.isVisible()) {
-        const bounds = await area.boundingBox();
-        if (bounds && bounds.y >= config.viewportHeight - 100) await area.scrollIntoViewIfNeeded();
-      }
     }
     return notes;
   } finally {

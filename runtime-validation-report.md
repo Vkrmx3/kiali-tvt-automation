@@ -19,7 +19,7 @@ collection was attempted. No CI/CD or production infrastructure was created.
 | Check | Status | Exit code | Evidence |
 | --- | --- | --- | --- |
 | `npm run build` | PASS | 0 | Strict TypeScript compilation with no emit. |
-| `npm test` | PASS | 0 | 117 passed, 0 failed, 0 skipped, across seven test files. |
+| `npm test` | PASS | 0 | 125 passed, 0 failed, 0 skipped, across seven test files. |
 | `npm run login -- --help` | PASS | 0 | Login entry point loads without opening a browser. |
 | `npm run tvt -- --help` | PASS | 0 | All documented execution options are available. |
 | Dedicated Edge profile round trip | PASS | 0 | Real Edge retained a synthetic loopback cookie after closing and reopening the same temporary profile. No Kiali navigation or existing user profile access. |
@@ -40,10 +40,15 @@ Git-ignored machine-readable result is
   messages, diagnostic images, and collision-safe output publication.
 - Real Chromium navigation with reordered query parameters, loading states,
   container selection, nonblank pixels, and viewport-limited Logs screenshots.
-- Logs time-range restoration from 30 to the requested 15 minutes, waiting for
-  refreshed log data, and normal evidence capture followed by the next service.
-  Range validation is independent of Overview duration. Wrong ranges, unsupported
-  menu options, active refresh, and missing pause evidence remain failures.
+- Custom Logs URLs with exact from/to millisecond bounds; the default interval
+  is 24 elapsed hours. The same bounds are used across services and retries,
+  independently of Overview duration and daylight-saving offsets.
+- Explicit proxy deselection, numeric-valued All lines options, asynchronous
+  log reloads, pausing restored refresh, and top-left log-pane positioning.
+- The Spring Boot startup banner must be visible in both the pane and viewport.
+  Missing/off-screen banners fail Logs while preserving Overview and continuing
+  to later services. Pre-capture checks reject changed proxy/line settings,
+  moved scroll positions, and shifted time bounds.
 - Continuation after failed workloads; preservation of a successful Overview
   when Logs fails; browser/page cleanup; selected and disabled service behavior.
 - Log text, headings, and buttons containing login/authentication/401/403 wording
@@ -63,11 +68,13 @@ Git-ignored machine-readable result is
 
 ## Fixes Verified
 
-- Reproduced the reported Logs range error locally with Kiali-style time-control
-  state restoring 30 minutes while the command requests 15. The utility now
-  selects the requested time-range option and verifies the resulting range and
-  paused refresh state instead of requiring unrelated URL parameters to remain
-  byte-for-byte unchanged. This is not a bypass of actual range validation.
+- Replaced reliance on preset time-range menu options with the user-provided
+  Custom URL format. The collector pins one end time, defaults to a one-day
+  interval, and verifies unchanged from/to bounds through capture and retries.
+- Logs evidence now requires All lines, proxy exclusion, top-left positioning,
+  and a visible Spring Boot banner. Fixture tests expose the banner only after
+  selecting All lines and deliberately auto-scroll new data to the bottom.
+  The utility changes display controls and scroll position, never log contents.
 - Removed body-text authentication heuristics and the global API-401 listener.
   Added origin/path-only diagnostic URL logging and confirmed retry handling.
 - Added optional `authenticationMode: persistentProfile` using installed Edge
@@ -90,7 +97,7 @@ Git-ignored machine-readable result is
 Both were medium severity. The final scan of the two patched resolutions found
 no known CVEs at the original dependency assessment. Nineteen focused
 CSV/workbook checks passed after installation; the current complete suite has
-117 passing tests. The UUID override preserves CommonJS compatibility.
+125 passing tests. The UUID override preserves CommonJS compatibility.
 
 ## Security Review
 
@@ -123,7 +130,7 @@ Run the following manually, using npm.cmd in this PowerShell environment:
 
 ```powershell
 npm.cmd run login
-npm.cmd run tvt -- --release "VDI-Auth-Check" --service "security-movement-out-v1" --headed --keep-temp
+npm.cmd run tvt -- --release "VDI-Startup-Check" --service "security-movement-out-v1" --minutes 1440 --headed --keep-temp
 ```
 
 To test Edge mode, select `authenticationMode: persistentProfile` in the VDI
@@ -134,3 +141,8 @@ Review the limited run and adjust selectors/layout from its actual results
 before attempting the full service list. Microsoft Excel itself was not used;
 workbook structure and image payloads were verified programmatically with
 ExcelJS.
+
+The banner must actually exist in retained logs inside the selected window.
+Non-Spring services, disabled banners, rotated logs, or startup outside the
+window cannot meet this startup-evidence requirement; the utility reports that
+limitation instead of inventing a banner or silently widening the interval.

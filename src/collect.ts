@@ -14,6 +14,7 @@ export async function collectServices(context: BrowserContext, services: Service
   const sheetNames = createSheetNames(services.map((service) => service.serviceName));
   const results: ServiceResult[] = [];
   const usedDirectories = new Set<string>();
+  const logsToMilliseconds = Date.now();
   let authenticationFailure: AuthenticationError | undefined;
     for (const [index, service] of services.entries()) {
       const result = createServiceResult(service, sheetNames[index]!);
@@ -44,10 +45,10 @@ export async function collectServices(context: BrowserContext, services: Service
               if (!page || page.isClosed()) page = await context.newPage();
               const activePage = page;
               try {
-                const notes = await prepareWorkloadPage(activePage, config, service, tab, logsDurationSeconds);
+                const notes = await prepareWorkloadPage(activePage, config, service, tab, logsDurationSeconds, logsToMilliseconds);
                 const destination = path.join(directory, tab === 'info' ? '01-overview.png' : '02-logs.png');
                 notes.push(...await captureScreenshot(activePage, config, destination, kind, async () => {
-                  await assertWorkloadView(activePage, config, service, tab, logsDurationSeconds);
+                  await assertWorkloadView(activePage, config, service, tab, logsDurationSeconds, logsToMilliseconds);
                 }));
                 result.remarks.push(...notes);
                 if (attempt) result.remarks.push(`${label}: recovered after one authentication-page retry.`);
@@ -67,7 +68,7 @@ export async function collectServices(context: BrowserContext, services: Service
                 }
                 if (attempt === 0 && !signal?.aborted) {
                   report(index, services.length, `${label}: checking the target again before confirming authentication failure.`);
-                  logDiagnosticUrl(workloadUrl(config, service, tab, logsDurationSeconds), 'Retry');
+                  logDiagnosticUrl(workloadUrl(config, service, tab, logsDurationSeconds, logsToMilliseconds), 'Retry');
                   continue;
                 }
                 if (signal?.aborted) throw new TvtError('INTERRUPTED', 'Run was interrupted.');

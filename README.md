@@ -104,7 +104,7 @@ not create new contexts. No session data is printed or embedded in the workbook.
 After logging in, run only one service initially:
 
 ```sh
-npm.cmd run tvt -- --release "Test-Release" --service "security-movement-out-v1" --headed --keep-temp
+npm.cmd run tvt -- --release "VDI-Startup-Check" --service "security-movement-out-v1" --minutes 1440 --headed --keep-temp
 ```
 
 Ensure that service is enabled in the CSV. Run this inside VDI; do not attempt
@@ -112,7 +112,9 @@ production Kiali access from an outside machine.
 
 Review the Summary and service sheet. Confirm that the expected workload,
 Overview content, Logs tab, application container, and requested log period are
-visible. Check the PNGs in the release's temporary directory if needed.
+visible. For Logs, confirm Custom covers 24 hours, sidecar-proxy is unchecked,
+All lines is selected, and the Spring Boot banner appears at the top of the log
+pane. Check the PNGs in the release's temporary directory if needed.
 
 Automated browser tests use local fixtures, not your corporate Kiali deployment.
 Kiali versions can differ in markup and authentication. Validate this limited
@@ -124,7 +126,7 @@ health or log contents passed a business acceptance check.
 
 ```sh
 npm run tvt -- --release "Release-2026-10-09"
-npm run tvt -- --release "Release-2026-10-09" --minutes 15
+npm run tvt -- --release "Release-2026-10-09" --minutes 1440
 npm run tvt -- --release "Release-2026-10-09" --headed
 npm run tvt -- --release "Release-2026-10-09" --service "kafka-ui"
 npm run tvt -- --release "Release-2026-10-09" --config "services.csv"
@@ -133,7 +135,7 @@ npm run tvt -- --release "Release-2026-10-09" --config "services.csv"
 | Argument | Meaning |
 | --- | --- |
 | `--release <name>` | Required, non-empty release label, at most 200 characters. The original label is displayed; the filename is sanitized. |
-| `--minutes <integer>` | Override log duration, from 1 through 1440 minutes. Defaults to the configured log duration, normally 15 minutes. |
+| `--minutes <integer>` | Override the custom log window, from 1 through 1440 minutes. Defaults to the configured duration, now 1440 minutes (24 hours). |
 | `--headed` | Show the configured Chromium or Edge browser. Otherwise use `defaultHeadless`. |
 | `--service <name>` | Process one enabled service by exact, case-sensitive `serviceName`. |
 | `--config <path>` | Service CSV, default `services.csv`. This is **not** the JSON settings path. |
@@ -181,7 +183,7 @@ anz-adapter-service-v1,backoffice,anz-adapter-service-v1,true
   "authenticationMode": "storageState",
   "kialiBaseUrl": "https://kiali.prd.ausiex.com.au/kiali/console",
   "overviewDurationSeconds": 300,
-  "logsDurationSeconds": 900,
+  "logsDurationSeconds": 86400,
   "pageTimeoutMilliseconds": 90000,
   "renderWaitMilliseconds": 5000,
   "viewportWidth": 1920,
@@ -230,18 +232,18 @@ The utility navigates directly to:
 ```
 
 Overview uses `tab=info`, the configured overview duration in `duration` and
-`rangeDuration`, and `refresh=0`. Logs navigation initially uses `tab=logs`, the selected log duration
-in both duration parameters, and `refresh=0`. For example, `--minutes 30` sets
-`rangeDuration=1800` and `duration=1800`. Parameter order does not matter.
+`rangeDuration`, and `refresh=0`. Logs now uses `tab=logs`, `refresh=0`, and custom
+`from`/`to` epoch-millisecond bounds. The end is fixed once when collection starts;
+the start is 86,400,000 milliseconds earlier by default. These exact bounds are
+reused for every service and retry. `--minutes` can explicitly change the interval.
+The separate Overview `duration` remains unchanged and no Logs `rangeDuration`
+parameter or preset time-range menu option is used. Parameter order does not matter.
 
-Kiali may restore a different Logs range from its time-control state. When that
-happens, the utility selects the requested period in the visible time-range
-menu and waits for the updated logs. It verifies `rangeDuration` and the visible
-range label before and after capture. The separate Overview `duration` value
-does not determine the Logs period. An omitted `refresh` parameter is accepted
-only when the toolbar explicitly shows `Pause`; a nonzero refresh value is
-rejected. An unavailable menu period or an unverified range still fails safely;
-the utility never substitutes a different duration to make the capture pass.
+The utility verifies the custom bounds and `Custom` label, when the control is
+present, before and after capture. A rewritten or moving window is rejected.
+If Kiali restores automatic refresh, its refresh control is set to `Pause`.
+An omitted `refresh` parameter is accepted only with explicit paused UI evidence.
+One day means exactly 24 elapsed hours, including across daylight-saving changes.
 
 Each tab waits for DOMContentLoaded, the workload identity, the requested tab,
 visible loading indicators to disappear, and the configured render delay.
@@ -251,11 +253,27 @@ access, page errors, and missing log content are recorded as failures.
 
 For multiple containers, an exact workload-name match is preferred. Supported
 native selects, labelled checkboxes, and container dropdowns are handled.
-With checkboxes, the exact application container is retained and others are
-deselected. The utility never deliberately selects `sidecar-proxy`,
-`istio-proxy`, or `linkerd-proxy`. Ambiguous views are retained with a warning.
-This is a display selection only; log filters, log levels, and pod data are not
-changed. Empty logs and visible "Max lines exceeded" messages produce warnings.
+The named proxy checkboxes (`sidecar-proxy`, `istio-proxy`, `linkerd-proxy`) are
+explicitly unchecked. With an exact workload-name match, that application
+container is retained and the other container checkboxes are deselected. An
+ambiguous application selection is retained with a warning, but selected proxy
+checkboxes still block capture. This changes the visible container selection only,
+not log levels, pod data, or application log text.
+
+Before the Logs screenshot, the utility selects **All lines**, waits for the
+resulting requests and rendering, then scrolls the **log pane** to its top-left.
+It verifies that the Spring Boot startup banner marker (`:: Spring Boot ::`) is
+visible inside both the log pane and the screenshot viewport. These settings
+are rechecked immediately before and after capture.
+
+The utility cannot manufacture a startup banner. If startup is outside the
+selected window, logs have rotated, the banner is disabled, or the service is
+not a Spring Boot application, Logs is marked FAILED with an explicit reason;
+Overview and subsequent services are still processed. Empty logs similarly fail
+this startup-evidence requirement. A visible "Max lines exceeded" warning is
+recorded even when All lines was requested. Kiali/server-side limits can still
+truncate data. Loading one day of all lines may be expensive for busy workloads;
+validate one service inside VDI before running the complete list.
 
 Overview uses a full-page capture when the page is at most three viewport
 heights; taller pages use a viewport capture with a Summary warning. Logs and
@@ -374,8 +392,10 @@ in `finally` blocks. A forced OS termination cannot guarantee finalization.
 | TLS certificate validation failure | Use the approved corporate CA/trust configuration. Do not bypass TLS. |
 | Workload not found or access denied | Check exact CSV names and account permissions. No role or cluster changes are performed by this utility. |
 | Expected tab/workload or logs area absent | Rerun one service with `--headed --keep-temp`; inspect sanitized remarks and PNGs. The deployed Kiali markup may require selector adjustment. |
-| Wrong Logs period reported | Check the visible time-range menu and requested minutes. The tool selects the requested menu option when Kiali restores another period, but refuses unsupported options or an unverified resulting range. |
-| Empty logs or Max lines exceeded | Review the warning and visible evidence. The utility does not change log limits or export all logs. |
+| Wrong custom Logs window reported | Confirm Kiali preserved the supplied from/to bounds and shows Custom. Do not substitute a different preset. |
+| All lines cannot be selected | Inspect the line-count control in a headed run. The utility supports native selects and Kiali-style numeric-valued options using their visible labels. |
+| Spring Boot banner not visible | Verify startup occurred within the selected window, logs were retained, and the application emits its banner. No banner or log content is fabricated. |
+| Empty logs or Max lines exceeded | Empty logs fail startup evidence. A maximum-lines warning may remain even with All lines due to server limits; review the visible evidence. |
 | Output file in use or permission denied | Close it in Excel, check directory permissions, or omit `--overwrite` to write a new filename. |
 | Unexpected browser failure | Review sanitized Remarks, rerun one headed service, and check Chromium installation. Raw Playwright diagnostics are deliberately not printed. |
 
@@ -400,6 +420,9 @@ real Chromium against a temporary loopback fixture server and close it afterward
 They verify container selection, capture dimensions and nonblank pixels, failed
 service continuation, positive authentication detection, retry confirmation,
 redacted diagnostics, read-only requests, and the end-to-end report/cleanup flow.
+Startup-evidence fixtures simulate numeric dropdown option labels, asynchronous
+log reloads, automatic bottom scrolling, proxy logs, and missing/off-screen
+Spring banners. Custom-range tests verify exact bounds across retries and services.
 Unit tests verify Edge channel/profile selection and shared-context lifecycle
 without requiring Edge installation. There is no development server to leave running.
 
