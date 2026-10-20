@@ -262,6 +262,9 @@ not log levels, pod data, or application log text.
 
 Before the Logs screenshot, the utility selects **All lines**, waits for the
 resulting requests and rendering, then scrolls the **log pane** to its top-left.
+The actual overflow elements are resolved inside the log content or its nearest
+scrolling wrapper; resetting the page or a non-scrolling wrapper is not sufficient.
+Unrelated panels are not scrolled, and the actual log scroll offsets are checked.
 It verifies that the Spring Boot startup banner marker (`:: Spring Boot ::`) is
 visible inside both the log pane and the screenshot viewport. These settings
 are rechecked immediately before and after capture.

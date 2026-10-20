@@ -1,4 +1,4 @@
-import type { BrowserContext, Locator, Page, Request, Response } from 'playwright';
+import type { BrowserContext, JSHandle, Locator, Page, Request, Response } from 'playwright';
 import { AuthenticationError, TvtError, logDiagnosticUrl } from './logger.js';
 import type { AppConfig, Service } from './types.js';
 
@@ -317,8 +317,37 @@ async function selectAllLogLines(page: Page, config: AppConfig): Promise<void> {
   }
 }
 
-async function springBannerVisible(area: Locator): Promise<boolean> {
-  return area.evaluate((element) => {
+interface LogViewport {
+  viewport: Element;
+  scrollContainers: Element[];
+}
+
+async function resolveLogViewport(page: Page): Promise<JSHandle<LogViewport>> {
+  return logArea(page).filter({ visible: true }).first().evaluateHandle((element) => {
+    const canScroll = (candidate: Element): boolean => {
+      if (!candidate.clientHeight || !candidate.clientWidth) return false;
+      const style = getComputedStyle(candidate);
+      if (style.visibility !== 'visible') return false;
+      return /^(auto|scroll|overlay)$/.test(style.overflowY) && candidate.scrollHeight > candidate.clientHeight + 1 ||
+        /^(auto|scroll|overlay)$/.test(style.overflowX) && candidate.scrollWidth > candidate.clientWidth + 1;
+    };
+    const scrollContainers = [element, ...Array.from(element.querySelectorAll('*'))].filter(canScroll);
+    let parent = element.parentElement;
+    while (parent && !parent.matches('body, html, main, [role="main"], nav, aside')) {
+      if (canScroll(parent)) {
+        scrollContainers.push(parent);
+        break;
+      }
+      parent = parent.parentElement;
+    }
+    const viewport = scrollContainers.find((candidate) => /^(auto|scroll|overlay)$/.test(getComputedStyle(candidate).overflowY) &&
+      candidate.scrollHeight > candidate.clientHeight + 1) ?? scrollContainers[0] ?? element;
+    return { viewport, scrollContainers };
+  });
+}
+
+async function springBannerVisible(area: JSHandle<LogViewport>): Promise<boolean> {
+  return area.evaluate(({ viewport: element }) => {
     const boundary = element.getBoundingClientRect();
     const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
     let node = walker.nextNode();
@@ -346,19 +375,29 @@ async function assertLogPresentation(page: Page): Promise<void> {
   if (!/^All lines$/i.test(await controlText(linesControl(page)) ?? '')) {
     throw new TvtError('LOG_LINES', 'The Logs line-count control is not set to All lines. Capture was stopped.');
   }
-  const area = logArea(page).filter({ visible: true }).first();
-  if (!(await area.isVisible()) || !(await area.evaluate((element) => element.scrollTop <= 1 && element.scrollLeft <= 1))) {
-    throw new TvtError('LOG_SCROLL', 'The log window is not at its top-left position. Capture was stopped.');
-  }
-  if (!(await springBannerVisible(area))) {
-    throw new TvtError('SPRING_BANNER', 'Spring Boot banner is not visible at the top of the selected log window. Startup may be outside this window, logs may have rotated, or the application may not emit the banner.');
+  const area = await resolveLogViewport(page);
+  try {
+    const atTop = await area.evaluate(({ viewport, scrollContainers }) => viewport.isConnected && viewport.getClientRects().length > 0 &&
+      scrollContainers.every((element) => element.scrollTop <= 1 && element.scrollLeft <= 1));
+    if (!atTop) throw new TvtError('LOG_SCROLL', 'The log window is not at its top-left position. Capture was stopped.');
+    if (!(await springBannerVisible(area))) {
+      throw new TvtError('SPRING_BANNER', 'Spring Boot banner is not visible at the top of the selected log window. Startup may be outside this window, logs may have rotated, or the application may not emit the banner.');
+    }
+  } finally {
+    await area.dispose();
   }
 }
 
 async function positionLogsAtTop(page: Page): Promise<void> {
-  const area = logArea(page).filter({ visible: true }).first();
-  await area.scrollIntoViewIfNeeded();
-  await area.evaluate((element) => { element.scrollTop = 0; element.scrollLeft = 0; });
+  const area = await resolveLogViewport(page);
+  try {
+    await area.evaluate(({ viewport, scrollContainers }) => {
+      viewport.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'instant' });
+      for (const element of scrollContainers) element.scrollTo({ top: 0, left: 0, behavior: 'instant' });
+    });
+  } finally {
+    await area.dispose();
+  }
   await page.waitForTimeout(100);
   await assertLogPresentation(page);
 }
