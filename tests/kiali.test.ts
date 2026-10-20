@@ -1,9 +1,12 @@
 import { createServer, type Server } from 'node:http';
+import { execFile } from 'node:child_process';
 import { once } from 'node:events';
 import { readFileSync } from 'node:fs';
 import { copyFile, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { promisify } from 'node:util';
+import { fileURLToPath } from 'node:url';
 import { chromium, type Browser, type BrowserContext } from 'playwright';
 import { PNG } from 'pngjs';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -191,6 +194,76 @@ async function collect(names: string[]): Promise<ServiceResult[]> {
 }
 
 describe('real Chromium, loopback Kiali fixtures only', () => {
+  it('executes Logs scrolling through the actual tsx runtime used by the CLI', async () => {
+    const script = `
+      import { chromium } from 'playwright';
+      import { readFileSync } from 'node:fs';
+      import { parseConfig } from './src/config.ts';
+      import { prepareWorkloadPage } from './src/kiali.ts';
+      const config = parseConfig(JSON.parse(readFileSync('config.json', 'utf8')), process.env.KIALI_BASE_URL);
+      config.pageTimeoutMilliseconds = 4000;
+      config.renderWaitMilliseconds = 80;
+      const browser = await chromium.launch({headless: true});
+      try {
+        const context = await browser.newContext({viewport: {width: 1920, height: 1080}});
+        try {
+          const page = await context.newPage();
+          await prepareWorkloadPage(page, config, {serviceName: 'good-app', namespace: 'test', workload: 'good-app'}, 'logs', 86400);
+          console.log('TSX_LOG_CAPTURE_OK');
+        } finally { await context.close(); }
+      } finally { await browser.close(); }
+    `;
+    const output = await promisify(execFile)(process.execPath, ['--import', 'tsx', '--input-type=module', '--eval', script], {
+      cwd: fileURLToPath(new URL('../', import.meta.url)),
+      env: { ...process.env, KIALI_BASE_URL: config.kialiBaseUrl },
+      timeout: 30000,
+    });
+    expect(output.stdout).toContain('TSX_LOG_CAPTURE_OK');
+  });
+
+  it.each(['zero-height', 'sized'])('scrolls the inspected virtualized grid through a %s wrapper and waits for row rendering', async (layout) => {
+    const page = await context.newPage();
+    const end = Date.now();
+    const service = { serviceName: 'virtual-logs', namespace: 'test', workload: 'virtual-logs' };
+    await context.route('**/namespaces/test/workloads/virtual-logs?*', (route) => route.fulfill({
+      contentType: 'text/html',
+      body: `<style>body{margin:20px}#logsText{font:14px/20px monospace;white-space:pre}#unrelated-panel{position:fixed;right:20px;top:20px;height:40px;width:100px;overflow:auto}</style>
+        <main><h1>Workload: virtual-logs</h1><button role="tab" aria-selected="true">Logs</button><button>Custom</button><button>Pause</button>
+        <label><input id="container-0" type="checkbox" checked>virtual-logs</label><button id="wpl_tailLines">All lines</button>
+        <div id="logs"><div id="logsDiv"><div id="logsText" style="height:${layout === 'zero-height' ? 0 : 600}px;position:relative">
+        <div style="overflow:visible;height:0px;width:0px"><div role="grid" aria-label="grid" aria-readonly="true" tabindex="0" class="ReactVirtualized__Grid ReactVirtualized__List" style="height:542px;width:897px;overflow:auto;position:relative">
+        <div style="height:8000px;width:1800px;position:relative"><div id="mounted-row" role="row" aria-rowindex="400" style="position:absolute;top:7800px;left:600px">Latest application log rows</div></div>
+        </div></div></div></div></div></main><aside id="unrelated-panel"><div style="height:500px">Unrelated panel</div></aside>
+        <script>
+          const grid = document.querySelector('#logsText [role="grid"]');
+          grid.scrollTop = grid.scrollHeight;
+          grid.scrollLeft = 600;
+          let renderingTop = false;
+          grid.addEventListener('scroll', () => {
+            if (grid.scrollTop === 0 && grid.scrollLeft === 0 && !renderingTop) {
+              renderingTop = true;
+              const row = document.getElementById('mounted-row');
+              row.style.top = '0px'; row.style.left = '0px'; row.textContent = 'Rendering first rows';
+              setTimeout(() => { row.textContent = ':: Spring Boot :: (virtualized fixture)'; row.setAttribute('aria-rowindex', '1'); }, 350);
+            }
+          });
+          document.getElementById('unrelated-panel').scrollTop = 200;
+        </script>`,
+    }));
+    try {
+      await prepareWorkloadPage(page, config, service, 'logs', 86400, end);
+      const grid = page.locator('#logsText').getByRole('grid', { name: 'grid', exact: true });
+      expect(await grid.evaluate((element) => [element.scrollTop, element.scrollLeft])).toEqual([0, 0]);
+      expect(await grid.getByRole('row').getAttribute('aria-rowindex')).toBe('1');
+      expect(await page.locator('#unrelated-panel').evaluate((element) => element.scrollTop)).toBe(200);
+      const screenshot = path.join(directory, `virtualized-${layout}.png`);
+      await captureScreenshot(page, config, screenshot, 'logs', () => assertWorkloadView(page, config, service, 'logs', 86400, end));
+      expect(PNG.sync.read(await readFile(screenshot)).height).toBe(1080);
+    } finally {
+      await page.close();
+    }
+  });
+
   it.each(['inner', 'wrapper'])('scrolls the actual %s log viewport without scrolling unrelated panels', async (layout) => {
     const page = await context.newPage();
     const end = Date.now();
