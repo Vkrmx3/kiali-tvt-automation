@@ -264,6 +264,10 @@ Before the Logs screenshot, the utility selects **All lines**, waits for the
 resulting requests and rendering, then scrolls the **log pane** to its top-left.
 The actual overflow elements are resolved inside the log content or its nearest
 scrolling wrapper; resetting the page or a non-scrolling wrapper is not sufficient.
+For ReactVirtualized, the explicit `#logsText [role="grid"][aria-label="grid"]`
+element is used even when its layout wrapper has zero height. The utility focuses
+that grid, resets both scroll directions, and waits up to 10 seconds (bounded by
+the page timeout) for the first virtualized rows and banner to render.
 Unrelated panels are not scrolled, and the actual log scroll offsets are checked.
 It verifies that the Spring Boot startup banner marker (`:: Spring Boot ::`) is
 visible inside both the log pane and the screenshot viewport. These settings

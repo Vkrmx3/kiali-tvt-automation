@@ -19,7 +19,7 @@ collection was attempted. No CI/CD or production infrastructure was created.
 | Check | Status | Exit code | Evidence |
 | --- | --- | --- | --- |
 | `npm run build` | PASS | 0 | Strict TypeScript compilation with no emit. |
-| `npm test` | PASS | 0 | 127 passed, 0 failed, 0 skipped, across seven test files. |
+| `npm test` | PASS | 0 | 130 passed, 0 failed, 0 skipped, across seven test files. |
 | `npm run login -- --help` | PASS | 0 | Login entry point loads without opening a browser. |
 | `npm run tvt -- --help` | PASS | 0 | All documented execution options are available. |
 | Dedicated Edge profile round trip | PASS | 0 | Real Edge retained a synthetic loopback cookie after closing and reopening the same temporary profile. No Kiali navigation or existing user profile access. |
@@ -48,6 +48,9 @@ Git-ignored machine-readable result is
 - Nested and wrapping log scroll viewports are reset to their actual top-left
   positions, without scrolling unrelated panels. Normal Logs PNG capture passes,
   and later movement of the internal scroll pane is rejected before capture.
+- The actual tsx execution path runs in a subprocess against the local fixture
+  server. ReactVirtualized grid tests reproduce zero-height layout wrappers and
+  delayed first-row mounting, and verify saved PNGs after both offsets reach zero.
 - The Spring Boot startup banner must be visible in both the pane and viewport.
   Missing/off-screen banners fail Logs while preserving Overview and continuing
   to later services. Pre-capture checks reject changed proxy/line settings,
@@ -71,6 +74,14 @@ Git-ignored machine-readable result is
 
 ## Fixes Verified
 
+- Reproduced `ReferenceError: __name is not defined` in the scroll callback under
+  tsx. Its injected function-name helper was absent in the browser, although
+  Vitest's transform passed the earlier tests. Removed the local named callback
+  and added same-runtime regression coverage.
+- The inspected `#logsText [role="grid"][aria-label="grid"]` now takes precedence
+  over wrapper-based discovery. A visible grid works even below a zero-height
+  wrapper. Top-row rendering is verified with a bounded wait, and unexpected
+  scroll-stage errors receive a controlled diagnostic message.
 - Reproduced the reported banner failure with a scrollbar on an inner div or a
   wrapper around the log text. The old helper reset only the first content
   element. Scrolling, offset checks, and banner visibility now share the resolved
@@ -104,7 +115,7 @@ Git-ignored machine-readable result is
 Both were medium severity. The final scan of the two patched resolutions found
 no known CVEs at the original dependency assessment. Nineteen focused
 CSV/workbook checks passed after installation; the current complete suite has
-127 passing tests. The UUID override preserves CommonJS compatibility.
+130 passing tests. The UUID override preserves CommonJS compatibility.
 
 ## Security Review
 

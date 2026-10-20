@@ -4,7 +4,8 @@ import type { AppConfig, Service } from './types.js';
 
 export type KialiTab = 'info' | 'logs';
 
-const LOG_AREA_SELECTOR = '#logsText, [role="log"], [data-testid="log-viewer"], [data-testid="logs-content"], [data-test="logs-content"], pre';
+const LOG_GRID_SELECTOR = '#logsText [role="grid"][aria-label="grid"]';
+const LOG_AREA_SELECTOR = `${LOG_GRID_SELECTOR}, #logsText, [role="log"], [data-testid="log-viewer"], [data-testid="logs-content"], [data-test="logs-content"], pre`;
 
 export function workloadUrl(config: AppConfig, service: Service, tab: KialiTab, logsDurationSeconds = config.logsDurationSeconds, logsToMilliseconds = Date.now()): string {
   if ([service.namespace, service.workload].some((value) => value === '.' || value === '..' || !value)) {
@@ -323,23 +324,29 @@ interface LogViewport {
 }
 
 async function resolveLogViewport(page: Page): Promise<JSHandle<LogViewport>> {
+  const grid = page.locator(LOG_GRID_SELECTOR).filter({ visible: true });
+  const gridCount = await grid.count();
+  if (gridCount > 1) throw new TvtError('LOG_SCROLL', 'More than one visible Kiali log grid was found. Capture was stopped.');
+  if (gridCount === 1) {
+    return grid.evaluateHandle((element) => ({ viewport: element, scrollContainers: [element] }));
+  }
   return logArea(page).filter({ visible: true }).first().evaluateHandle((element) => {
-    const canScroll = (candidate: Element): boolean => {
+    const candidates = [element, ...Array.from(element.querySelectorAll('*'))];
+    let parent = element.parentElement;
+    while (parent && !parent.matches('body, html, main, [role="main"], nav, aside')) {
+      candidates.push(parent);
+      parent = parent.parentElement;
+    }
+    const scrollable = candidates.filter((candidate) => {
       if (!candidate.clientHeight || !candidate.clientWidth) return false;
       const style = getComputedStyle(candidate);
       if (style.visibility !== 'visible') return false;
       return /^(auto|scroll|overlay)$/.test(style.overflowY) && candidate.scrollHeight > candidate.clientHeight + 1 ||
         /^(auto|scroll|overlay)$/.test(style.overflowX) && candidate.scrollWidth > candidate.clientWidth + 1;
-    };
-    const scrollContainers = [element, ...Array.from(element.querySelectorAll('*'))].filter(canScroll);
-    let parent = element.parentElement;
-    while (parent && !parent.matches('body, html, main, [role="main"], nav, aside')) {
-      if (canScroll(parent)) {
-        scrollContainers.push(parent);
-        break;
-      }
-      parent = parent.parentElement;
-    }
+    });
+    const scrollContainers = scrollable.filter((candidate) => element.contains(candidate));
+    const wrapper = scrollable.find((candidate) => !element.contains(candidate));
+    if (wrapper) scrollContainers.push(wrapper);
     const viewport = scrollContainers.find((candidate) => /^(auto|scroll|overlay)$/.test(getComputedStyle(candidate).overflowY) &&
       candidate.scrollHeight > candidate.clientHeight + 1) ?? scrollContainers[0] ?? element;
     return { viewport, scrollContainers };
@@ -388,18 +395,36 @@ async function assertLogPresentation(page: Page): Promise<void> {
   }
 }
 
-async function positionLogsAtTop(page: Page): Promise<void> {
-  const area = await resolveLogViewport(page);
+async function positionLogsAtTop(page: Page, config: AppConfig): Promise<void> {
+  const deadline = Date.now() + Math.min(config.pageTimeoutMilliseconds, 10000);
+  let lastFailure: TvtError | undefined;
   try {
-    await area.evaluate(({ viewport, scrollContainers }) => {
-      viewport.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'instant' });
-      for (const element of scrollContainers) element.scrollTo({ top: 0, left: 0, behavior: 'instant' });
-    });
-  } finally {
-    await area.dispose();
+    do {
+      await assertAuthenticated(page, config);
+      const area = await resolveLogViewport(page);
+      try {
+        await area.evaluate(({ viewport, scrollContainers }) => {
+          viewport.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'instant' });
+          if (viewport instanceof HTMLElement) viewport.focus({ preventScroll: true });
+          for (const element of scrollContainers) element.scrollTo({ top: 0, left: 0, behavior: 'instant' });
+        });
+      } finally {
+        await area.dispose();
+      }
+      await page.waitForTimeout(150);
+      try {
+        await assertLogPresentation(page);
+        return;
+      } catch (error) {
+        if (!(error instanceof TvtError) || !['LOG_SCROLL', 'SPRING_BANNER'].includes(error.code)) throw error;
+        lastFailure = error;
+      }
+    } while (Date.now() < deadline);
+    throw lastFailure ?? new TvtError('LOG_SCROLL', 'The Kiali log grid did not settle at its top-left position.');
+  } catch (error) {
+    if (error instanceof TvtError) throw error;
+    throw new TvtError('LOG_SCROLL', 'Unable to locate, focus, scroll, or inspect the Kiali log viewport. Capture was stopped.');
   }
-  await page.waitForTimeout(100);
-  await assertLogPresentation(page);
 }
 
 async function chooseContainer(page: Page, service: Service, config: AppConfig): Promise<string[]> {
@@ -490,7 +515,7 @@ export async function prepareWorkloadPage(page: Page, config: AppConfig, service
     }
     if (config.renderWaitMilliseconds) await page.waitForTimeout(config.renderWaitMilliseconds);
     await waitUntil(page, config, signals, ready, 'The workload view did not stabilize before capture.');
-    if (tab === 'logs') await positionLogsAtTop(page);
+    if (tab === 'logs') await positionLogsAtTop(page, config);
     await assertWorkloadView(page, config, service, tab, logsDurationSeconds, logsToMilliseconds);
     if (tab === 'logs') {
       if (await visible(page.getByText(/Max lines exceeded/i))) notes.push('Max lines exceeded: the logs view is truncated.');
