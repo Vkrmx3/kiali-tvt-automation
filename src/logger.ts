@@ -54,19 +54,3 @@ export function safeErrorMessage(error: unknown): string {
 export function progress(index: number, total: number, message: string): void {
   console.log(`[${index + 1}/${total}] ${consoleText(message)}`);
 }
-
-export type TimingStage = 'browser-startup' | 'browser-cleanup' | 'page-create' | 'navigation' | 'page-ready' |
-  'container-selection' | 'line-selection' | 'log-reload' | 'render-settle' | 'scroll-banner' |
-  'capture-checks' | 'screenshot' | 'screenshot-write' | 'workbook-images' | 'workbook-layout' |
-  'workbook-write' | 'workbook-verify' | 'workbook-publish';
-export type TimingSink = (stage: TimingStage, milliseconds: number) => void;
-
-export async function measureStage<Value>(stage: TimingStage, sink: TimingSink | undefined, operation: () => Value | Promise<Value>): Promise<Value> {
-  if (!sink) return operation();
-  const started = performance.now();
-  try {
-    return await operation();
-  } finally {
-    sink(stage, performance.now() - started);
-  }
-}

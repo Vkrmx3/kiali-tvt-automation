@@ -1,7 +1,7 @@
 import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { Frame, Page } from 'playwright';
-import { TvtError, measureStage, type TimingSink } from './logger.js';
+import { TvtError } from './logger.js';
 import { safePathSegment } from './naming.js';
 import type { AppConfig } from './types.js';
 
@@ -32,8 +32,8 @@ export async function captureAuthenticationCheck(page: Page, config: AppConfig, 
   await writeFile(path.join(directory, 'authentication-check.png'), bytes, { mode: 0o600 });
 }
 
-export async function captureScreenshot(page: Page, config: AppConfig, destination: string, kind: 'overview' | 'logs' | 'error', verify: () => Promise<void>, timing?: TimingSink): Promise<string[]> {
-  await measureStage('capture-checks', timing, verify);
+export async function captureScreenshot(page: Page, config: AppConfig, destination: string, kind: 'overview' | 'logs' | 'error', verify: () => Promise<void>): Promise<string[]> {
+  await verify();
   let navigated = false;
   const onNavigation = (frame: Frame): void => { if (frame === page.mainFrame()) navigated = true; };
   page.on('framenavigated', onNavigation);
@@ -45,13 +45,11 @@ export async function captureScreenshot(page: Page, config: AppConfig, destinati
       fullPage = height <= config.viewportHeight * 3;
       if (!fullPage) notes.push('Overview exceeds three viewport heights; captured the visible page to keep the image readable.');
     }
-    const bytes = await measureStage('screenshot', timing, () => page.screenshot({ type: 'png', fullPage, timeout: config.pageTimeoutMilliseconds }));
-    await measureStage('capture-checks', timing, verify);
+    const bytes = await page.screenshot({ type: 'png', fullPage, timeout: config.pageTimeoutMilliseconds });
+    await verify();
     if (navigated) throw new TvtError('CAPTURE_NAVIGATION', 'Page changed during capture. No potentially misleading screenshot was saved.');
-    await measureStage('screenshot-write', timing, async () => {
-      await mkdir(path.dirname(destination), { recursive: true, mode: 0o700 });
-      await writeFile(destination, bytes, { flag: 'wx', mode: 0o600 });
-    });
+    await mkdir(path.dirname(destination), { recursive: true, mode: 0o700 });
+    await writeFile(destination, bytes, { flag: 'wx', mode: 0o600 });
     return notes;
   } finally {
     page.off('framenavigated', onNavigation);

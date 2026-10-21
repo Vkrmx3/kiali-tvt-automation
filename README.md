@@ -142,7 +142,6 @@ npm run tvt -- --release "Release-2026-10-09" --config "services.csv"
 | `--settings <path>` | Application settings JSON, default `config.json`. |
 | `--keep-temp` | Keep screenshots after workbook verification. |
 | `--overwrite` | Explicitly allow replacement of the original release workbook. |
-| `--profile` | Print cumulative stage timings without page contents, query strings, or authentication data. |
 | `--help` | Display command help without launching a browser. |
 
 Relative TVT input paths resolve from the project root. Login settings resolve
@@ -224,56 +223,17 @@ delay 0-60,000 milliseconds, viewport width 640-3840, height 480-2160, and devic
 scale 0.5-3. Page timeout applies to each navigation/readiness stage, not the
 entire run. Defaults favor reliable sequential collection over speed.
 
-`renderWaitMilliseconds` is now a maximum render-settle budget, not an unconditional
-sleep. Once required requests and loading indicators finish, capture can proceed
-after the DOM has been quiet for 200 ms and fonts are loaded. The configured budget
-bounds that extra wait; readiness and pre/post-capture checks still apply. Slow
-same-origin Kiali data requests are awaited even when the DOM appears quiet.
+The render delay is an additional cushion after readiness checks, applied once
+per tab. The default is now 1 second instead of 5: two normal captures add
+2 seconds of fixed waiting rather than 10. Page loading, log reloads, screenshot
+encoding, and workbook creation still take their actual required time. Increase
+the setting if your environment's charts need more settling time; lowering it
+does not disable workload, time-range, container, or banner checks.
 
 Progress includes elapsed seconds for Overview, Logs, and each service. Tab
 timings include navigation, readiness, retries, and PNG capture; the service
 total excludes initial browser startup and final workbook creation. Use these
 timings from a single-service VDI test before considering further optimization.
-
-### Performance Profiling
-
-Run inside VDI with the same service and evidence settings used for comparison:
-
-```powershell
-npm.cmd run tvt -- --release "VDI-Performance-Check" --service "batchfile-transformer-v1" --minutes 1440 --keep-temp --profile
-```
-
-Add `--headed` when visually debugging, but use the same browser mode on both
-sides of a timing comparison. The profile separates CLI bootstrap, browser
-startup/cleanup, page creation, navigation, readiness, log controls/reloads,
-render settling, scrolling/banner checks, capture validation, PNG encoding,
-file writes, image loading, workbook construction/write, and read-back verification.
-Stage values accumulate across services and retries. They do not include npm
-startup outside the Node process, and should not be treated as a VDI performance
-guarantee. Only fixed stage names and elapsed times are emitted.
-
-Collection remains sequential. A healthy page is reused; a failed service's page
-is closed before the next service. Full workload URL navigation, read-only request
-blocking, and both authentication modes remain enabled. Log controls are configured
-before waiting for superseded intermediate log fetches. The final view still waits
-for all pending data, All lines, application-container selection, exact time bounds,
-top-left position, and the visible Spring banner before capture.
-
-The read-only request interceptor intentionally remains in place. Playwright routing
-disables HTTP caching; this tradeoff was audited but not bypassed with undocumented
-cache overrides. Screenshot dimensions, PNG encoding, workbook compression, and
-read-back verification are unchanged. Further gains may depend on Kiali/backend
-latency and the volume of one day's logs.
-
-A controlled local fixture benchmark is available with:
-
-```powershell
-npm.cmd test -- tests/kiali.test.ts --testNamePattern="benchmarks sequential evidence"
-```
-
-It uses three sequential services, the same 24-hour window, 1920x1080 viewport,
-All lines, and six embedded screenshots. Results go to `temp/performance-current.json`.
-This is a synthetic loopback workload, not a substitute for VDI measurement.
 
 ## Collection Behavior
 
@@ -400,8 +360,7 @@ suffixes. Only the current run's directory is removed, after successful
 workbook verification, unless `--keep-temp` was supplied. If workbook creation
 fails, temporary screenshots and any staged workbook are preserved.
 
-Services run sequentially using a reusable healthy page in the same authenticated
-context. A failed service's page is closed and replaced. A failed Overview does not
+Services run sequentially, each with a fresh page. A failed Overview does not
 prevent an attempt to capture Logs, and a failed service does not stop later
 services. Successfully captured tabs are retained. Missing or unreadable PNGs
 also downgrade the affected result rather than breaking other service sheets.
