@@ -6,7 +6,7 @@ import { loadAuthentication, openBrowserSession, type BrowserSession } from './a
 import { collectServices } from './collect.js';
 import { loadConfig, parseMinutes } from './config.js';
 import { enableReadOnlyRequests } from './kiali.js';
-import { TvtError, consoleText, measureStage, safeErrorMessage, type TimingSink, type TimingStage } from './logger.js';
+import { TvtError, consoleText, safeErrorMessage } from './logger.js';
 import { createSheetNames } from './naming.js';
 import { createServiceResult, resultCounts } from './results.js';
 import { createRunTempDirectory } from './screenshots.js';
@@ -28,7 +28,6 @@ export function parseRunOptions(argv: string[]): RunOptions {
     .option('--settings <path>', 'application settings JSON path', 'config.json')
     .option('--keep-temp', 'preserve temporary screenshots after workbook verification', false)
     .option('--overwrite', 'explicitly replace the existing release workbook', false)
-    .option('--profile', 'print sanitized phase timings after collection', false)
     .configureOutput({ writeErr: () => undefined })
     .exitOverride();
   try {
@@ -41,7 +40,7 @@ export function parseRunOptions(argv: string[]): RunOptions {
   }
   const options = command.opts<{
     release: string; minutes?: number; headed: boolean; service?: string;
-    config: string; settings: string; keepTemp: boolean; overwrite: boolean; profile: boolean;
+    config: string; settings: string; keepTemp: boolean; overwrite: boolean;
   }>();
   if (!options.release.trim() || options.release.length > 200 || /[\x00-\x1f\x7f]/.test(options.release)) {
     throw new TvtError('ARGUMENT', 'Release must be a non-empty, single-line label of at most 200 characters.');
@@ -55,14 +54,11 @@ export function parseRunOptions(argv: string[]): RunOptions {
     settingsPath: options.settings,
     keepTemp: options.keepTemp,
     overwrite: options.overwrite,
-    profile: options.profile,
   };
 }
 
-export async function runTvt(options: RunOptions, rootDirectory = projectRoot): Promise<{ workbookPath: string; results: ServiceResult[]; exitCode: number; tempDirectory: string; timings: Partial<Record<TimingStage, number>> }> {
+export async function runTvt(options: RunOptions, rootDirectory = projectRoot): Promise<{ workbookPath: string; results: ServiceResult[]; exitCode: number; tempDirectory: string }> {
   const startedAt = new Date();
-  const timings: Partial<Record<TimingStage, number>> = {};
-  const timing: TimingSink | undefined = options.profile ? (stage, duration) => { timings[stage] = (timings[stage] ?? 0) + duration; } : undefined;
   const config = await loadConfig(path.resolve(rootDirectory, options.settingsPath));
   const services = await loadServices(path.resolve(rootDirectory, options.configPath), options.service);
   const authDirectory = path.join(rootDirectory, 'auth');
@@ -79,14 +75,14 @@ export async function runTvt(options: RunOptions, rootDirectory = projectRoot): 
   process.once('SIGINT', interrupt);
   process.once('SIGTERM', interrupt);
   try {
-    session = await measureStage('browser-startup', timing, () => openBrowserSession(config, authDirectory, {
+    session = await openBrowserSession(config, authDirectory, {
       headless: options.headed ? false : config.defaultHeadless,
       readOnly: true,
       storageState: state,
-    }));
+    });
     if (controller.signal.aborted) throw new TvtError('INTERRUPTED', 'Run was interrupted.');
     await enableReadOnlyRequests(session.context);
-    results = await collectServices(session.context, services, config, tempDirectory, logsDurationSeconds, controller.signal, undefined, timing);
+    results = await collectServices(session.context, services, config, tempDirectory, logsDurationSeconds, controller.signal);
   } catch (error) {
     const names = createSheetNames(services.map((service) => service.serviceName));
     results = services.map((service, index) => {
@@ -95,7 +91,7 @@ export async function runTvt(options: RunOptions, rootDirectory = projectRoot): 
       return result;
     });
   } finally {
-    await measureStage('browser-cleanup', timing, async () => { await session?.close().catch(() => undefined); });
+    await session?.close().catch(() => undefined);
     process.off('SIGINT', interrupt);
     process.off('SIGTERM', interrupt);
   }
@@ -106,7 +102,7 @@ export async function runTvt(options: RunOptions, rootDirectory = projectRoot): 
     startedAt,
     completedAt: new Date(),
     logsDurationSeconds,
-  }, results, path.join(rootDirectory, 'output'), options.overwrite, timing);
+  }, results, path.join(rootDirectory, 'output'), options.overwrite);
   const counts = resultCounts(results);
   console.log('\nTVT collection completed.\n');
   console.log(`Release:         ${consoleText(options.release)}`);
@@ -115,10 +111,6 @@ export async function runTvt(options: RunOptions, rootDirectory = projectRoot): 
   console.log(`Warnings:        ${counts.warnings}`);
   console.log(`Failed:          ${counts.failed}`);
   console.log(`Workbook:        ${output.path}`);
-  if (options.profile) {
-    console.log('\nPhase timings (seconds, cumulative across services):');
-    for (const [stage, duration] of Object.entries(timings)) console.log(`  ${stage.padEnd(20)} ${(duration / 1000).toFixed(3)}`);
-  }
   if (!options.keepTemp) {
     try {
       await rm(tempDirectory, { recursive: true, force: true });
@@ -126,13 +118,12 @@ export async function runTvt(options: RunOptions, rootDirectory = projectRoot): 
       console.warn('Workbook verified, but temporary screenshots could not be removed. Check local file permissions.');
     }
   }
-  return { workbookPath: output.path, results, exitCode: controller.signal.aborted ? 130 : counts.failed ? 1 : 0, tempDirectory, timings };
+  return { workbookPath: output.path, results, exitCode: controller.signal.aborted ? 130 : counts.failed ? 1 : 0, tempDirectory };
 }
 
 async function main(): Promise<void> {
   try {
     const options = parseRunOptions(process.argv);
-    if (options.profile) console.log(`CLI bootstrap: ${process.uptime().toFixed(3)}s (before browser startup)`);
     const result = await runTvt(options);
     process.exitCode = result.exitCode;
   } catch (error) {

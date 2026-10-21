@@ -15,12 +15,7 @@ afterEach(async () => { await rm(directory, { recursive: true, force: true }); }
 describe('workbook integration (generated PNGs, no Kiali)', () => {
   it('reopens a complete workbook and validates sheets, hyperlinks, embedded images, and non-overlapping layout', async () => {
     const results = await createSampleResults(directory);
-    const stages: string[] = [];
-    const output = await writeWorkbook(sampleMetadata, results, path.join(directory, 'output'), false, (stage, duration) => {
-      stages.push(stage);
-      expect(duration).toBeGreaterThanOrEqual(0);
-    });
-    expect(stages).toEqual(['workbook-images', 'workbook-layout', 'workbook-write', 'workbook-verify', 'workbook-publish']);
+    const output = await writeWorkbook(sampleMetadata, results, path.join(directory, 'output'));
     expect(output.verification).toMatchObject({ worksheetCount: 3, summaryRows: 2, imageCount: 4 });
     expect(output.verification.bytes).toBeGreaterThan(1000);
     expect(path.basename(output.path)).toBe('TVT-Workbook-Sample.xlsx');

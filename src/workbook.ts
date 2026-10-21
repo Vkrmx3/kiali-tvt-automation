@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import ExcelJS from 'exceljs';
 import { imageSize } from 'image-size';
-import { TvtError, measureStage, safeErrorMessage, type TimingSink } from './logger.js';
+import { TvtError, safeErrorMessage } from './logger.js';
 import { formatSydneyTime, safeExcelText, safePathSegment, sheetHyperlink } from './naming.js';
 import { finishResult, resultCounts } from './results.js';
 import type { RunMetadata, ServiceResult, ResultStatus } from './types.js';
@@ -265,31 +265,24 @@ export async function verifyWorkbook(filePath: string, results: readonly Service
   return { worksheetCount: reopened.worksheets.length, summaryRows: results.length, imageCount, bytes: fileInfo.size };
 }
 
-export async function writeWorkbook(metadata: RunMetadata, results: ServiceResult[], outputDirectory: string, overwrite = false, timing?: TimingSink): Promise<WorkbookOutput> {
+export async function writeWorkbook(metadata: RunMetadata, results: ServiceResult[], outputDirectory: string, overwrite = false): Promise<WorkbookOutput> {
   const directory = path.resolve(outputDirectory);
   const baseName = `TVT-${safePathSegment(metadata.release, 'Release')}`;
   const stagedPath = path.join(directory, `.${baseName}-${randomUUID()}.partial.xlsx`);
   try {
     await mkdir(directory, { recursive: true });
-    const evidence = await measureStage('workbook-images', timing, async () => {
-      const images: Evidence[] = [];
-      for (const result of results) images.push(await prepareEvidence(result));
-      return images;
-    });
-    const workbook = await measureStage('workbook-layout', timing, () => {
-      const report = new ExcelJS.Workbook();
-      report.creator = 'kiali-tvt-automation';
-      report.created = metadata.startedAt;
-      report.modified = metadata.completedAt;
-      buildSummary(report, metadata, results);
-      results.forEach((result, index) => buildServiceSheet(report, metadata, result, evidence[index]!));
-      return report;
-    });
+    const evidence: Evidence[] = [];
+    for (const result of results) evidence.push(await prepareEvidence(result));
+    const workbook = new ExcelJS.Workbook();
+    workbook.creator = 'kiali-tvt-automation';
+    workbook.created = metadata.startedAt;
+    workbook.modified = metadata.completedAt;
+    buildSummary(workbook, metadata, results);
+    results.forEach((result, index) => buildServiceSheet(workbook, metadata, result, evidence[index]!));
     const stagingFile = await open(stagedPath, 'wx', 0o600);
     await stagingFile.close();
-    await measureStage('workbook-write', timing, () => workbook.xlsx.writeFile(stagedPath));
-    const verification = await measureStage('workbook-verify', timing, () => verifyWorkbook(stagedPath, results));
-    const publishStarted = performance.now();
+    await workbook.xlsx.writeFile(stagedPath);
+    const verification = await verifyWorkbook(stagedPath, results);
     let destination = path.join(directory, `${baseName}.xlsx`);
     if (overwrite) {
       await rename(stagedPath, destination);
@@ -308,7 +301,6 @@ export async function writeWorkbook(metadata: RunMetadata, results: ServiceResul
       }
       await rm(stagedPath).catch(() => undefined);
     }
-    timing?.('workbook-publish', performance.now() - publishStarted);
     return { path: destination, verification };
   } catch (error) {
     const failure = new TvtError('WORKBOOK', `Workbook creation failed. ${safeErrorMessage(error)} Temporary screenshots have been preserved.`);

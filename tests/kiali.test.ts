@@ -7,7 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { chromium, type Browser, type BrowserContext, type Route } from 'playwright';
+import { chromium, type Browser, type BrowserContext } from 'playwright';
 import { PNG } from 'pngjs';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { collectServices } from '../src/collect.js';
@@ -15,7 +15,7 @@ import { parseConfig } from '../src/config.js';
 import { assertAuthenticated, assertWorkloadView, enableReadOnlyRequests, isAuthenticationPage, prepareWorkloadPage } from '../src/kiali.js';
 import { runTvt } from '../src/run-tvt.js';
 import { captureScreenshot } from '../src/screenshots.js';
-import { verifyWorkbook, writeWorkbook } from '../src/workbook.js';
+import { verifyWorkbook } from '../src/workbook.js';
 import type { AppConfig, RunOptions, ServiceResult } from '../src/types.js';
 
 let browser: Browser;
@@ -194,108 +194,6 @@ async function collect(names: string[]): Promise<ServiceResult[]> {
 }
 
 describe('real Chromium, loopback Kiali fixtures only', () => {
-  it('waits for a slow Overview data request even when the DOM appears quiet', async () => {
-    await context.route('**/api/overview-chart', async (route) => {
-      await new Promise((resolve) => setTimeout(resolve, 700));
-      await route.fulfill({ contentType: 'text/plain', body: 'Overview chart complete' });
-    });
-    await context.route('**/namespaces/test/workloads/slow-overview?*', (route) => route.fulfill({
-      contentType: 'text/html',
-      body: '<h1>Workload: slow-overview</h1><button role="tab" aria-selected="true">Overview</button><div id="chart">Chart pending</div><script>fetch("/api/overview-chart").then(response => response.text()).then(text => { document.getElementById("chart").textContent = text; });</script>',
-    }));
-    const page = await context.newPage();
-    try {
-      await prepareWorkloadPage(page, { ...config, renderWaitMilliseconds: 300 }, { serviceName: 'slow-overview', namespace: 'test', workload: 'slow-overview' }, 'info', 86400);
-      expect(await page.locator('#chart').innerText()).toBe('Overview chart complete');
-    } finally {
-      await page.close();
-    }
-  });
-
-  it('configures application-only All lines before waiting for obsolete log fetches', async () => {
-    const held: Route[] = [];
-    let requestedFinalView = false;
-    await context.route('**/api/namespaces/test/pods/queued-logs/logs?*', async (route) => {
-      const url = new URL(route.request().url());
-      if (url.searchParams.get('tailLines') !== '-1') {
-        held.push(route);
-        return;
-      }
-      requestedFinalView = true;
-      expect(url.searchParams.get('sidecar')).toBe('false');
-      for (const pending of held) await pending.fulfill({ contentType: 'text/plain', body: 'Superseded log view' });
-      await route.fulfill({ contentType: 'text/plain', body: ':: Spring Boot ::\nFinal application-only All lines view' });
-    });
-    const page = await context.newPage();
-    try {
-      await prepareWorkloadPage(page, config, { serviceName: 'queued-logs', namespace: 'test', workload: 'queued-logs' }, 'logs', 86400);
-      expect(requestedFinalView).toBe(true);
-      expect(await page.locator('#logsText').innerText()).toContain('Final application-only');
-    } finally {
-      await page.close();
-    }
-  });
-
-  it('waits for delayed rendered content while ending a quiet render budget early', async () => {
-    const page = await context.newPage();
-    const renderConfig = { ...config, renderWaitMilliseconds: 1500 };
-    await context.route('**/namespaces/test/workloads/render-settle?*', (route) => route.fulfill({
-      contentType: 'text/html',
-      body: `<h1>Workload: render-settle</h1><button role="tab" aria-selected="true">Overview</button><div id="chart">Chart rendering</div>
-        <script>let frame = 0; const animation = setInterval(() => { document.getElementById('chart').textContent = 'Chart frame ' + ++frame; if (frame === 5) { clearInterval(animation); document.getElementById('chart').textContent = 'Chart complete'; } }, 100);</script>`,
-    }));
-    const phases: Record<string, number> = {};
-    try {
-      await prepareWorkloadPage(page, renderConfig, { serviceName: 'render-settle', namespace: 'test', workload: 'render-settle' }, 'info', 86400, Date.now(), (stage, duration) => {
-        phases[stage] = (phases[stage] ?? 0) + duration;
-      });
-      expect(await page.locator('#chart').innerText()).toBe('Chart complete');
-      expect(phases['render-settle']).toBeLessThan(1500);
-    } finally {
-      await page.close();
-    }
-  });
-
-  it('benchmarks sequential evidence collection with unchanged capture requirements', async () => {
-    const benchmarkConfig = { ...config, renderWaitMilliseconds: 1000 };
-    const services = ['benchmark-one', 'benchmark-two', 'benchmark-three'].map((name) => ({
-      serviceName: name, namespace: 'test', workload: name,
-    }));
-    const started = performance.now();
-    const stageMilliseconds: Record<string, number> = {};
-    const results = await collectServices(context, services, benchmarkConfig, directory, 86400, undefined, () => undefined, (stage, duration) => {
-      stageMilliseconds[stage] = (stageMilliseconds[stage] ?? 0) + duration;
-    });
-    const collectionMilliseconds = Math.round(performance.now() - started);
-    expect(results.map((result) => result.result)).toEqual(['PASS', 'PASS', 'PASS']);
-    expect(results.every((result) => result.overviewScreenshotPath && result.logsScreenshotPath)).toBe(true);
-    expect(context.pages()).toHaveLength(0);
-    const workbookStarted = performance.now();
-    const workbook = await writeWorkbook({
-      release: 'Local-Performance-Fixture', environment: 'LOCAL FIXTURE ONLY', kialiBaseUrl: config.kialiBaseUrl,
-      startedAt: new Date(), completedAt: new Date(), logsDurationSeconds: 86400,
-    }, results, path.join(directory, 'output'), false, (stage, duration) => {
-      stageMilliseconds[stage] = (stageMilliseconds[stage] ?? 0) + duration;
-    });
-    const workbookMilliseconds = Math.round(performance.now() - workbookStarted);
-    expect(workbook.verification).toMatchObject({ worksheetCount: 4, summaryRows: 3, imageCount: 6 });
-    const reportDirectory = fileURLToPath(new URL('../temp', import.meta.url));
-    await mkdir(reportDirectory, { recursive: true });
-    const label = process.env.TVT_BENCHMARK_LABEL === 'baseline' ? 'baseline-profiled' : 'current';
-    const report = {
-      scope: 'Loopback fixture only; not a VDI or production performance measurement.',
-      fixture: { version: 1, services: 3, logDurationSeconds: 86400, viewport: '1920x1080', renderWaitMilliseconds: 1000, logEntries: 80 },
-      collectionMilliseconds,
-      workbookMilliseconds,
-      serviceMilliseconds: results.map((result) => result.elapsedMilliseconds),
-      logRequests: requests.filter((request) => request.pathname.endsWith('/logs')).length,
-      capturedImages: results.length * 2,
-      stageMilliseconds,
-    };
-    await writeFile(path.join(reportDirectory, `performance-${label}.json`), JSON.stringify(report, null, 2));
-    console.log(`Local fixture collection: ${collectionMilliseconds} ms for ${services.length} services.`);
-  }, 120000);
-
   it('executes Logs scrolling through the actual tsx runtime used by the CLI', async () => {
     const script = `
       import { chromium } from 'playwright';
@@ -659,8 +557,6 @@ describe('real Chromium, loopback Kiali fixtures only', () => {
 
   it('captures useful PNGs, continues after a failed workload, and closes all pages', async () => {
     const report = vi.fn();
-    let pagesCreated = 0;
-    context.on('page', () => { pagesCreated++; });
     const services = ['missing', 'good-app', 'max-lines'].map((name) => ({ serviceName: name, namespace: 'test', workload: name }));
     const results = await collectServices(context, services, config, directory, 1800, undefined, report);
     expect(results.map((result) => result.result)).toEqual(['FAILED', 'PASS', 'PASS WITH WARNING']);
@@ -675,7 +571,6 @@ describe('real Chromium, loopback Kiali fixtures only', () => {
     expect(report).toHaveBeenCalledWith(1, 3, expect.stringMatching(/^Overview captured \(\d+\.\ds\)$/));
     expect(report).toHaveBeenCalledWith(1, 3, expect.stringMatching(/^Logs captured \(\d+\.\ds\)$/));
     expect(report).toHaveBeenCalledWith(1, 3, expect.stringMatching(/^PASS \(\d+\.\ds\)$/));
-    expect(pagesCreated).toBe(2);
     expect(context.pages()).toHaveLength(0);
   });
 
@@ -761,15 +656,10 @@ describe('real Chromium, loopback Kiali fixtures only', () => {
     await mkdir(path.join(directory, 'auth'));
     await writeFile(path.join(directory, 'auth', 'kiali-session.json'), JSON.stringify({ cookies: [], origins: [] }));
     await writeFile(path.join(directory, 'services.csv'), 'serviceName,namespace,workload,enabled\nmissing,test,missing,true\ngood-app,test,good-app,true\ndisabled,test,disabled,false');
-    const options: RunOptions = { release: 'Offline-Integration', configPath: 'services.csv', settingsPath: 'config.json', minutes: 30, headed: false, service: undefined, keepTemp: true, overwrite: false, profile: true };
+    const options: RunOptions = { release: 'Offline-Integration', configPath: 'services.csv', settingsPath: 'config.json', minutes: 30, headed: false, service: undefined, keepTemp: true, overwrite: false };
     const failedRun = await runTvt(options, directory);
     expect(failedRun.exitCode).toBe(1);
     expect(failedRun.results).toHaveLength(2);
-    expect(failedRun.timings['browser-startup']).toBeGreaterThan(0);
-    expect(failedRun.timings['navigation']).toBeGreaterThan(0);
-    expect(failedRun.timings['screenshot']).toBeGreaterThan(0);
-    expect(failedRun.timings['workbook-write']).toBeGreaterThan(0);
-    expect(failedRun.timings['workbook-verify']).toBeGreaterThan(0);
     expect((await verifyWorkbook(failedRun.workbookPath, failedRun.results)).worksheetCount).toBe(3);
     expect(await readdir(failedRun.tempDirectory)).toContain('good-app');
     const selectedRun = await runTvt({ ...options, service: 'good-app', keepTemp: false }, directory);

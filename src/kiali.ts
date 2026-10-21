@@ -1,5 +1,5 @@
 import type { BrowserContext, JSHandle, Locator, Page, Request, Response } from 'playwright';
-import { AuthenticationError, TvtError, logDiagnosticUrl, measureStage, type TimingSink } from './logger.js';
+import { AuthenticationError, TvtError, logDiagnosticUrl } from './logger.js';
 import type { AppConfig, Service } from './types.js';
 
 export type KialiTab = 'info' | 'logs';
@@ -56,21 +56,18 @@ export async function getAuthenticationError(page: Page, config: AppConfig): Pro
   if (isAuthenticationUrl(page.url(), config.kialiBaseUrl)) {
     return new AuthenticationError('Browser redirected to a known sign-in URL. Run: npm run login');
   }
-  const evidence = await page.locator('input[type="password"], form').filter({ visible: true }).evaluateAll(
-    (elements, selector) => {
-      const outsideLogs = elements.filter((element) => !element.closest(selector));
-      return {
-        passwordVisible: outsideLogs.some((element) => element.tagName === 'INPUT'),
-        forms: outsideLogs.filter((element) => element.tagName === 'FORM').map((element) => ({
-          id: element.getAttribute('id') ?? '', name: element.getAttribute('name') ?? '',
-          testId: element.getAttribute('data-testid') ?? element.getAttribute('data-test') ?? '',
-          action: element.getAttribute('action') ?? '',
-        })),
-      };
-    }, LOG_AREA_SELECTOR,
+  const passwordVisible = await page.locator('input[type="password"]').filter({ visible: true }).evaluateAll(
+    (elements, selector) => elements.some((element) => !element.closest(selector)), LOG_AREA_SELECTOR,
   );
-  if (evidence.passwordVisible) return new AuthenticationError('A visible password input confirms a sign-in page. Run: npm run login');
-  for (const form of evidence.forms) {
+  if (passwordVisible) return new AuthenticationError('A visible password input confirms a sign-in page. Run: npm run login');
+  const forms = await page.locator('form').filter({ visible: true }).evaluateAll(
+    (elements, selector) => elements.filter((element) => !element.closest(selector)).map((element) => ({
+      id: element.getAttribute('id') ?? '', name: element.getAttribute('name') ?? '',
+      testId: element.getAttribute('data-testid') ?? element.getAttribute('data-test') ?? '',
+      action: element.getAttribute('action') ?? '',
+    })), LOG_AREA_SELECTOR,
+  );
+  for (const form of forms) {
     const loginAttributes = /(?:^|[-_])(?:login|signin|sign-in|sign_in)(?:form)?(?:$|[-_])/i;
     let loginAction = false;
     try {
@@ -97,13 +94,12 @@ export async function assertAuthenticated(page: Page, config: AppConfig): Promis
 interface PageSignals {
   apiFailure: string | undefined;
   pendingLogs: Set<Request>;
-  pendingData: Set<Request>;
   dispose: () => void;
 }
 
 function observeRequests(page: Page, config: AppConfig): PageSignals {
   const base = new URL(config.kialiBaseUrl);
-  const signals: PageSignals = { apiFailure: undefined, pendingLogs: new Set(), pendingData: new Set(), dispose: () => undefined };
+  const signals: PageSignals = { apiFailure: undefined, pendingLogs: new Set(), dispose: () => undefined };
   const relevant = (request: Request): 'logs' | 'workload' | undefined => {
     const url = new URL(request.url());
     if (url.origin !== base.origin || !url.pathname.includes('/api/')) return undefined;
@@ -111,18 +107,13 @@ function observeRequests(page: Page, config: AppConfig): PageSignals {
     if (/\/namespaces\/[^/]+\/workloads\/[^/]+\/?$/i.test(url.pathname)) return 'workload';
     return undefined;
   };
-  const onRequest = (request: Request): void => {
-    const url = new URL(request.url());
-    if (url.origin === base.origin && url.pathname.includes('/api/') && ['fetch', 'xhr'].includes(request.resourceType())) signals.pendingData.add(request);
-    if (relevant(request) === 'logs') signals.pendingLogs.add(request);
-  };
-  const onFinished = (request: Request): void => { signals.pendingLogs.delete(request); signals.pendingData.delete(request); };
+  const onRequest = (request: Request): void => { if (relevant(request) === 'logs') signals.pendingLogs.add(request); };
+  const onFinished = (request: Request): void => { signals.pendingLogs.delete(request); };
   const onFailed = (request: Request): void => {
     if (relevant(request) && request.failure()?.errorText !== 'net::ERR_ABORTED') {
       signals.apiFailure = 'A required Kiali data request failed. Check network access and workload permissions.';
     }
     signals.pendingLogs.delete(request);
-    signals.pendingData.delete(request);
   };
   const onResponse = (response: Response): void => {
     const request = response.request();
@@ -191,26 +182,12 @@ function emptyLogs(page: Page): Locator {
 }
 
 async function logsVisible(page: Page): Promise<boolean> {
-  const hasContent = await logArea(page).filter({ visible: true }).evaluateAll((elements) =>
-    elements.some((element) => element instanceof HTMLElement && element.innerText.trim().length > 0));
-  return hasContent || await visible(emptyLogs(page));
-}
-
-async function waitForRenderSettle(page: Page, maximumMilliseconds: number): Promise<void> {
-  if (!maximumMilliseconds) return;
-  await page.evaluate(({ maximum, quiet }) => new Promise<void>((resolve) => {
-    const started = performance.now();
-    let changedAt = started;
-    const observer = new MutationObserver(() => { changedAt = performance.now(); });
-    observer.observe(document.body, { childList: true, subtree: true, characterData: true, attributes: true });
-    const timer = window.setInterval(() => {
-      if (performance.now() - started >= maximum || document.fonts.status === 'loaded' && performance.now() - changedAt >= quiet) {
-        window.clearInterval(timer);
-        observer.disconnect();
-        resolve();
-      }
-    }, 50);
-  }), { maximum: maximumMilliseconds, quiet: Math.min(200, maximumMilliseconds) });
+  if (await visible(emptyLogs(page))) return true;
+  const areas = logArea(page).filter({ visible: true });
+  for (const area of await areas.all()) {
+    if ((await area.innerText()).trim().length) return true;
+  }
+  return false;
 }
 
 async function waitUntil(page: Page, config: AppConfig, signals: PageSignals, condition: () => Promise<boolean>, message: string, bootstrapUrl?: string): Promise<void> {
@@ -376,11 +353,8 @@ async function resolveLogViewport(page: Page): Promise<JSHandle<LogViewport>> {
   });
 }
 
-async function logViewportEvidence(area: JSHandle<LogViewport>): Promise<{ atTop: boolean; bannerVisible: boolean }> {
-  return area.evaluate(({ viewport: element, scrollContainers }) => {
-    const atTop = element.isConnected && element.getClientRects().length > 0 &&
-      scrollContainers.every((container) => container.scrollTop <= 1 && container.scrollLeft <= 1);
-    if (!atTop) return { atTop: false, bannerVisible: false };
+async function springBannerVisible(area: JSHandle<LogViewport>): Promise<boolean> {
+  return area.evaluate(({ viewport: element }) => {
     const boundary = element.getBoundingClientRect();
     const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
     let node = walker.nextNode();
@@ -393,33 +367,27 @@ async function logViewportEvidence(area: JSHandle<LogViewport>): Promise<{ atTop
         const bounds = range.getBoundingClientRect();
         if (bounds.width > 0 && bounds.height > 0 && bounds.top >= Math.max(0, boundary.top) &&
             bounds.bottom <= Math.min(window.innerHeight, boundary.bottom) && bounds.left >= Math.max(0, boundary.left) &&
-            bounds.right <= Math.min(window.innerWidth, boundary.right)) return { atTop: true, bannerVisible: true };
+            bounds.right <= Math.min(window.innerWidth, boundary.right)) return true;
       }
       node = walker.nextNode();
     }
-    return { atTop: true, bannerVisible: false };
+    return false;
   });
 }
 
 async function assertLogPresentation(page: Page): Promise<void> {
-  const controls = await proxyCheckboxes(page).or(linesControl(page)).evaluateAll((elements) => {
-    const proxySelected = elements.some((element) => element instanceof HTMLInputElement && element.type === 'checkbox' && element.checked);
-    const lineControls = elements.filter((element) => !(element instanceof HTMLInputElement && element.type === 'checkbox'));
-    const control = lineControls[0];
-    const label = control instanceof HTMLSelectElement ? control.selectedOptions[0]?.textContent?.trim() : control?.textContent?.trim();
-    return { proxySelected, allLines: lineControls.length === 1 && /^All lines$/i.test(label ?? '') };
-  });
-  if (controls.proxySelected) {
+  if (await proxyCheckboxes(page).evaluateAll((elements) => elements.some((element) => (element as HTMLInputElement).checked))) {
     throw new TvtError('LOG_PROXY', 'A proxy container is still selected. Capture was stopped.');
   }
-  if (!controls.allLines) {
+  if (!/^All lines$/i.test(await controlText(linesControl(page)) ?? '')) {
     throw new TvtError('LOG_LINES', 'The Logs line-count control is not set to All lines. Capture was stopped.');
   }
   const area = await resolveLogViewport(page);
   try {
-    const evidence = await logViewportEvidence(area);
-    if (!evidence.atTop) throw new TvtError('LOG_SCROLL', 'The log window is not at its top-left position. Capture was stopped.');
-    if (!evidence.bannerVisible) {
+    const atTop = await area.evaluate(({ viewport, scrollContainers }) => viewport.isConnected && viewport.getClientRects().length > 0 &&
+      scrollContainers.every((element) => element.scrollTop <= 1 && element.scrollLeft <= 1));
+    if (!atTop) throw new TvtError('LOG_SCROLL', 'The log window is not at its top-left position. Capture was stopped.');
+    if (!(await springBannerVisible(area))) {
       throw new TvtError('SPRING_BANNER', 'Spring Boot banner is not visible at the top of the selected log window. Startup may be outside this window, logs may have rotated, or the application may not emit the banner.');
     }
   } finally {
@@ -506,7 +474,7 @@ async function chooseContainer(page: Page, service: Service, config: AppConfig):
   }
 }
 
-export async function prepareWorkloadPage(page: Page, config: AppConfig, service: Service, tab: KialiTab, logsDurationSeconds: number, logsToMilliseconds = Date.now(), timing?: TimingSink): Promise<string[]> {
+export async function prepareWorkloadPage(page: Page, config: AppConfig, service: Service, tab: KialiTab, logsDurationSeconds: number, logsToMilliseconds = Date.now()): Promise<string[]> {
   const signals = observeRequests(page, config);
   const notes: string[] = [];
   page.setDefaultTimeout(config.pageTimeoutMilliseconds);
@@ -515,9 +483,9 @@ export async function prepareWorkloadPage(page: Page, config: AppConfig, service
     const destination = workloadUrl(config, service, tab, logsDurationSeconds, logsToMilliseconds);
     logDiagnosticUrl(destination, 'Target');
     try {
-      response = await measureStage('navigation', timing, () => page.goto(destination, {
+      response = await page.goto(destination, {
         waitUntil: 'domcontentloaded', timeout: config.pageTimeoutMilliseconds,
-      }));
+      });
     } catch (error) {
       await assertAuthenticated(page, config);
       throw error;
@@ -526,34 +494,29 @@ export async function prepareWorkloadPage(page: Page, config: AppConfig, service
     if (response?.status() === 403) throw new TvtError('ACCESS_DENIED', 'Access denied to the requested workload.');
     if (response?.status() === 404) throw new TvtError('NOT_FOUND', 'The requested workload page was not found.');
     if (response && response.status() >= 400) throw new TvtError('HTTP', `Kiali navigation failed with HTTP ${response.status()}.`);
-    await measureStage('page-ready', timing, () => waitUntil(page, config, signals, async () => await workloadVisible(page, service) && await tabVisible(page, tab), 'Expected workload name or requested tab did not become visible.', destination));
-    const ready = async (): Promise<boolean> => signals.pendingData.size === 0 && !(await visible(loadingIndicators(page))) &&
+    await waitUntil(page, config, signals, async () => await workloadVisible(page, service) && await tabVisible(page, tab), 'Expected workload name or requested tab did not become visible.', destination);
+    const ready = async (): Promise<boolean> => !(await visible(loadingIndicators(page))) &&
       (tab !== 'logs' || signals.pendingLogs.size === 0 && await logsVisible(page));
-    await measureStage('page-ready', timing, () => waitUntil(page, config, signals,
-      tab === 'logs' ? async () => await visible(emptyLogs(page)) || await visible(linesControl(page)) && await visible(logArea(page)) : ready,
-      tab === 'logs' ? 'The logs area or line-count control did not become available.' : 'Workload loading indicators did not disappear.'));
+    await waitUntil(page, config, signals, ready, tab === 'logs' ? 'The logs area never finished loading.' : 'Workload loading indicators did not disappear.');
     if (tab === 'logs') {
-      await measureStage('container-selection', timing, async () => {
-        await pauseLogRefresh(page, config);
-        await assertLogRange(page, logsDurationSeconds, logsToMilliseconds);
-        if (await visible(emptyLogs(page))) throw new TvtError('NO_LOGS', 'Kiali reports no logs in the selected window; the Spring Boot banner cannot be verified.');
-        for (const checkbox of await proxyCheckboxes(page).all()) {
-          await checkbox.uncheck({ timeout: Math.min(config.pageTimeoutMilliseconds, 5000) });
-        }
-        notes.push(...await chooseContainer(page, service, config));
-      });
+      await pauseLogRefresh(page, config);
+      await assertLogRange(page, logsDurationSeconds, logsToMilliseconds);
+      if (await visible(emptyLogs(page))) throw new TvtError('NO_LOGS', 'Kiali reports no logs in the selected window; the Spring Boot banner cannot be verified.');
+      for (const checkbox of await proxyCheckboxes(page).all()) {
+        await checkbox.uncheck({ timeout: Math.min(config.pageTimeoutMilliseconds, 5000) });
+      }
+      notes.push(...await chooseContainer(page, service, config));
     }
+    await waitUntil(page, config, signals, ready, 'The workload view did not finish rendering after container selection.');
     if (tab === 'logs') {
-      await measureStage('line-selection', timing, () => selectAllLogLines(page, config));
-      await measureStage('log-reload', timing, () => waitUntil(page, config, signals, async () => /^All lines$/i.test(await controlText(linesControl(page)) ?? '') && await ready(),
-        'All lines was not retained or the resulting logs did not finish loading.'));
+      await selectAllLogLines(page, config);
+      await waitUntil(page, config, signals, async () => /^All lines$/i.test(await controlText(linesControl(page)) ?? '') && await ready(),
+        'All lines was not retained or the resulting logs did not finish loading.');
     }
-    await measureStage('render-settle', timing, async () => {
-      await waitForRenderSettle(page, config.renderWaitMilliseconds);
-      await waitUntil(page, config, signals, ready, 'The workload view did not stabilize before capture.');
-    });
-    if (tab === 'logs') await measureStage('scroll-banner', timing, () => positionLogsAtTop(page, config));
-    await measureStage('capture-checks', timing, () => assertWorkloadView(page, config, service, tab, logsDurationSeconds, logsToMilliseconds));
+    if (config.renderWaitMilliseconds) await page.waitForTimeout(config.renderWaitMilliseconds);
+    await waitUntil(page, config, signals, ready, 'The workload view did not stabilize before capture.');
+    if (tab === 'logs') await positionLogsAtTop(page, config);
+    await assertWorkloadView(page, config, service, tab, logsDurationSeconds, logsToMilliseconds);
     if (tab === 'logs') {
       if (await visible(page.getByText(/Max lines exceeded/i))) notes.push('Max lines exceeded: the logs view is truncated.');
       if (await visible(emptyLogs(page))) notes.push('Kiali reports no logs for this workload or the selected time period.');
