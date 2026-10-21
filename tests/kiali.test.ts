@@ -556,7 +556,9 @@ describe('real Chromium, loopback Kiali fixtures only', () => {
   });
 
   it('captures useful PNGs, continues after a failed workload, and closes all pages', async () => {
-    const results = await collect(['missing', 'good-app', 'max-lines']);
+    const report = vi.fn();
+    const services = ['missing', 'good-app', 'max-lines'].map((name) => ({ serviceName: name, namespace: 'test', workload: name }));
+    const results = await collectServices(context, services, config, directory, 1800, undefined, report);
     expect(results.map((result) => result.result)).toEqual(['FAILED', 'PASS', 'PASS WITH WARNING']);
     expect(results[0]!.errorScreenshotPath).toBeTruthy();
     expect(results[2]!.remarks.join(' ')).toContain('Max lines exceeded');
@@ -566,6 +568,9 @@ describe('real Chromium, loopback Kiali fixtures only', () => {
     expect(logs.width).toBe(1920);
     expect(logs.height).toBe(1080);
     expect(new Set(logs.data).size).toBeGreaterThan(20);
+    expect(report).toHaveBeenCalledWith(1, 3, expect.stringMatching(/^Overview captured \(\d+\.\ds\)$/));
+    expect(report).toHaveBeenCalledWith(1, 3, expect.stringMatching(/^Logs captured \(\d+\.\ds\)$/));
+    expect(report).toHaveBeenCalledWith(1, 3, expect.stringMatching(/^PASS \(\d+\.\ds\)$/));
     expect(context.pages()).toHaveLength(0);
   });
 

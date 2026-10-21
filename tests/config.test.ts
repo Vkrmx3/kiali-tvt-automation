@@ -19,6 +19,7 @@ describe('configuration', () => {
     expect(parsed.kialiBaseUrl).toBe('https://example.invalid/kiali/console');
     expect(parsed.logsDurationSeconds).toBe(86400);
     expect(parsed.viewportWidth).toBe(1920);
+    expect(parsed.renderWaitMilliseconds).toBe(1000);
   });
 
   it.each(['0', '-1', '1.5', '1441', '15junk', '1e2', ''])('rejects invalid log periods: %s', (minutes) => {

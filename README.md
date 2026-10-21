@@ -185,7 +185,7 @@ anz-adapter-service-v1,backoffice,anz-adapter-service-v1,true
   "overviewDurationSeconds": 300,
   "logsDurationSeconds": 86400,
   "pageTimeoutMilliseconds": 90000,
-  "renderWaitMilliseconds": 5000,
+  "renderWaitMilliseconds": 1000,
   "viewportWidth": 1920,
   "viewportHeight": 1080,
   "deviceScaleFactor": 1,
@@ -222,6 +222,18 @@ Durations are validated. Page timeout accepts 1,000-600,000 milliseconds, render
 delay 0-60,000 milliseconds, viewport width 640-3840, height 480-2160, and device
 scale 0.5-3. Page timeout applies to each navigation/readiness stage, not the
 entire run. Defaults favor reliable sequential collection over speed.
+
+The render delay is an additional cushion after readiness checks, applied once
+per tab. The default is now 1 second instead of 5: two normal captures add
+2 seconds of fixed waiting rather than 10. Page loading, log reloads, screenshot
+encoding, and workbook creation still take their actual required time. Increase
+the setting if your environment's charts need more settling time; lowering it
+does not disable workload, time-range, container, or banner checks.
+
+Progress includes elapsed seconds for Overview, Logs, and each service. Tab
+timings include navigation, readiness, retries, and PNG capture; the service
+total excludes initial browser startup and final workbook creation. Use these
+timings from a single-service VDI test before considering further optimization.
 
 ## Collection Behavior
 

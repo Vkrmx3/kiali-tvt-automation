@@ -1,6 +1,6 @@
 # Runtime Validation Report
 
-Date: 2026-10-20
+Date: 2026-10-21
 
 Target: local kiali-tvt-automation CLI. No corporate Kiali login or live workload
 collection was attempted. No CI/CD or production infrastructure was created.
@@ -28,6 +28,11 @@ collection was attempted. No CI/CD or production infrastructure was created.
 The final standalone validation run passed all six assertions. Its local,
 Git-ignored machine-readable result is
 [.tsupgrader/runtime-validation/standalone-result.json](.tsupgrader/runtime-validation/standalone-result.json).
+
+The first local full-suite run exceeded its 240-second validation budget, and
+the Edge smoke check exceeded 90 seconds. The validation-only limits were raised
+to 480 and 180 seconds; the unchanged assertions passed on rerun. Application
+page timeouts and individual test assertions were not relaxed.
 
 ## Coverage
 
@@ -74,6 +79,11 @@ Git-ignored machine-readable result is
 
 ## Fixes Verified
 
+- Reduced the configured extra render delay from 5000 to 1000 milliseconds per
+  tab, removing 8 seconds of fixed waiting from two successful initial captures.
+  All readiness, authentication, range, container, scroll, and banner checks stay
+  enabled. Console progress now includes Overview, Logs, and service elapsed
+  seconds. Actual end-to-end VDI runtime has not been benchmarked by this agent.
 - Reproduced `ReferenceError: __name is not defined` in the scroll callback under
   tsx. Its injected function-name helper was absent in the browser, although
   Vitest's transform passed the earlier tests. Removed the local named callback
