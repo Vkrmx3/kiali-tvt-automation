@@ -39,6 +39,7 @@ export async function collectServices(context: BrowserContext, services: Service
           const kind = tab === 'info' ? 'overview' : 'logs';
           const label = tab === 'info' ? 'Overview' : 'Logs';
           const statusKey = `${kind}Status` as const;
+          const tabStarted = performance.now();
           try {
             for (let attempt = 0; attempt < 2; attempt++) {
               if (signal?.aborted) throw new TvtError('INTERRUPTED', 'Run was interrupted.');
@@ -55,7 +56,7 @@ export async function collectServices(context: BrowserContext, services: Service
                 result[`${kind}ScreenshotPath`] = destination;
                 result[statusKey] = 'CAPTURED';
                 result.captureTimestamp = new Date();
-                report(index, services.length, `${label} captured`);
+                report(index, services.length, `${label} captured (${((performance.now() - tabStarted) / 1000).toFixed(1)}s)`);
                 break;
               } catch (error) {
                 logDiagnosticUrl(activePage.url(), 'Current');
@@ -106,7 +107,7 @@ export async function collectServices(context: BrowserContext, services: Service
         finishResult(result);
         await page?.close().catch(() => undefined);
       }
-      report(index, services.length, result.result);
+      report(index, services.length, `${result.result} (${(result.elapsedMilliseconds / 1000).toFixed(1)}s)`);
     }
   return results;
 }
