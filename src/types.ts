@@ -52,4 +52,5 @@ export interface RunOptions {
   service: string | undefined;
   keepTemp: boolean;
   overwrite: boolean;
+  profile?: boolean;
 }

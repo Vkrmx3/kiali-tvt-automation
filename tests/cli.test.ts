@@ -56,9 +56,9 @@ describe('CLI and setup guards', () => {
   });
 
   it('supports all requested arguments and separates CSV from application settings', () => {
-    expect(parseRunOptions(['node', 'tvt', '--release', 'Test Release', '--minutes', '30', '--headed', '--service', 'kafka-ui', '--config', 'alternate.csv', '--settings', 'local.json', '--keep-temp', '--overwrite'])).toEqual({
+    expect(parseRunOptions(['node', 'tvt', '--release', 'Test Release', '--minutes', '30', '--headed', '--service', 'kafka-ui', '--config', 'alternate.csv', '--settings', 'local.json', '--keep-temp', '--overwrite', '--profile'])).toEqual({
       release: 'Test Release', minutes: 30, headed: true, service: 'kafka-ui',
-      configPath: 'alternate.csv', settingsPath: 'local.json', keepTemp: true, overwrite: true,
+      configPath: 'alternate.csv', settingsPath: 'local.json', keepTemp: true, overwrite: true, profile: true,
     });
   });
 

@@ -19,7 +19,7 @@ collection was attempted. No CI/CD or production infrastructure was created.
 | Check | Status | Exit code | Evidence |
 | --- | --- | --- | --- |
 | `npm run build` | PASS | 0 | Strict TypeScript compilation with no emit. |
-| `npm test` | PASS | 0 | 130 passed, 0 failed, 0 skipped, across seven test files. |
+| `npm test` | PASS | 0 | 134 passed, 0 failed, 0 skipped, across seven test files. |
 | `npm run login -- --help` | PASS | 0 | Login entry point loads without opening a browser. |
 | `npm run tvt -- --help` | PASS | 0 | All documented execution options are available. |
 | Dedicated Edge profile round trip | PASS | 0 | Real Edge retained a synthetic loopback cookie after closing and reopening the same temporary profile. No Kiali navigation or existing user profile access. |
@@ -33,6 +33,58 @@ The first local full-suite run exceeded its 240-second validation budget, and
 the Edge smoke check exceeded 90 seconds. The validation-only limits were raised
 to 480 and 180 seconds; the unchanged assertions passed on rerun. Application
 page timeouts and individual test assertions were not relaxed.
+
+## Performance Results
+
+Measured on this Windows workstation using the same three sequential loopback
+services, 24-hour custom window, 1920x1080 viewport, 1000 ms render budget,
+80-entry fixture data, All lines, application-only containers, and six PNGs.
+These are synthetic fixture results, not measurements inside VDI. No target
+Kiali URL was accessed. Screenshot quality and evidence checks were unchanged.
+
+| Measurement | Baseline | Optimized |
+| --- | --- | --- |
+| Collection, 3 services | 13.526 s | 10.093 s |
+| First service | 5.637 s | 5.861 s |
+| Second service | 3.989 s | 2.171 s |
+| Third service | 3.885 s | 2.041 s |
+| Render-settle stage, cumulative | 6.238 s | 1.450 s |
+| Log requests | 9 | 9 |
+| Captured images | 6 | 6 |
+| Workbook creation and verified read-back | Not measured in initial baseline | 0.859 s |
+
+Collection improved by approximately 25.4% (1.34x). The 2x end-to-end aspiration
+was not met. Warm-service mean improved from 3.937 s to 2.106 s (about 46.5%),
+while first-service timing did not improve in this single comparison. The fixture
+is much smaller than a real day's production logs; cold-start variance, backend
+latency, and larger payloads can dominate the VDI result.
+
+Preserved, Git-ignored evidence:
+- [temp/performance-baseline-profiled.json](temp/performance-baseline-profiled.json)
+- [temp/performance-optimized-standalone.json](temp/performance-optimized-standalone.json)
+
+The full suite also runs the benchmark, but its warm-process result was not used
+to replace the standalone comparison. This optimization does not reduce the number
+of log requests: it removes serial waiting between UI changes before the final
+view is requested. No requests or log data are silently discarded.
+
+Implemented improvements:
+- Bounded DOM/font settling replaces unconditional sleeps; pending Kiali data
+  requests and loading indicators are still awaited, including slow Overview data.
+- Password/form observations and log-control/scroll/banner observations are batched.
+- Log readiness returns booleans instead of copying whole log text to Node.
+- A healthy page is reused; failed services get a replacement page. All pages and
+  the shared authenticated context are still closed reliably.
+- `--profile` reports CLI bootstrap and cumulative stage durations for browser
+  startup/cleanup, navigation, readiness, controls, reloads, capture, file writes,
+  and workbook image/layout/write/verification stages.
+
+Caching was audited: Playwright routing disables HTTP caching. The existing
+mutation-blocking interceptor was retained; no undocumented cache override,
+manual authenticated-response cache, or weakened read-only policy was introduced.
+Full SPA navigation, PNG encoding, Excel compression, and workbook verification
+remain unchanged because the evidence did not justify a riskier change. No
+service concurrency was introduced.
 
 ## Coverage
 
@@ -76,14 +128,15 @@ page timeouts and individual test assertions were not relaxed.
   tolerated. Tests isolate KIALI_BASE_URL to their temporary loopback server.
 - The full collector-to-workbook flow returns failure status after writing a
   report, honors keep-temp, and removes only verified current-run evidence.
+- Performance profiling, delayed chart data, delayed DOM rendering, intermediate
+  log fetches, healthy-page reuse, and fresh-page failure recovery are covered.
 
 ## Fixes Verified
 
-- Reduced the configured extra render delay from 5000 to 1000 milliseconds per
-  tab, removing 8 seconds of fixed waiting from two successful initial captures.
-  All readiness, authentication, range, container, scroll, and banner checks stay
-  enabled. Console progress now includes Overview, Logs, and service elapsed
-  seconds. Actual end-to-end VDI runtime has not been benchmarked by this agent.
+- The earlier 1000 ms render setting is retained as a maximum settle budget;
+  a quiet DOM can now finish earlier. All readiness, authentication, range,
+  container, scroll, and banner checks remain enabled. End-to-end VDI runtime
+  has not been benchmarked by this agent.
 - Reproduced `ReferenceError: __name is not defined` in the scroll callback under
   tsx. Its injected function-name helper was absent in the browser, although
   Vitest's transform passed the earlier tests. Removed the local named callback
@@ -125,7 +178,7 @@ page timeouts and individual test assertions were not relaxed.
 Both were medium severity. The final scan of the two patched resolutions found
 no known CVEs at the original dependency assessment. Nineteen focused
 CSV/workbook checks passed after installation; the current complete suite has
-130 passing tests. The UUID override preserves CommonJS compatibility.
+134 passing tests. The UUID override preserves CommonJS compatibility.
 
 ## Security Review
 
@@ -154,11 +207,18 @@ Corporate SSO, deployed Kiali selectors, actual container labels, and screenshot
 layout with real workloads: NOT YET VERIFIED. No claim of live feature parity or
 production release acceptance is made.
 
-Run the following manually, using npm.cmd in this PowerShell environment:
+For the performance update, sync these changed source files to VDI:
+`src/collect.ts`, `src/kiali.ts`, `src/logger.ts`, `src/run-tvt.ts`,
+`src/screenshots.ts`, `src/types.ts`, and `src/workbook.ts`.
+No dependency installation or configuration/authentication/CSV changes are needed.
+Preserve the VDI's environment and session/profile data.
+
+Run the following manually inside VDI, comparing the same service, browser mode,
+and retained log data before and after:
 
 ```powershell
-npm.cmd run login
-npm.cmd run tvt -- --release "VDI-Startup-Check" --service "security-movement-out-v1" --minutes 1440 --headed --keep-temp
+npm.cmd run build
+npm.cmd run tvt -- --release "VDI-Performance-Check" --service "batchfile-transformer-v1" --minutes 1440 --keep-temp --profile
 ```
 
 To test Edge mode, select `authenticationMode: persistentProfile` in the VDI
