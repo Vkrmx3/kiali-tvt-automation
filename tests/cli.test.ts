@@ -55,10 +55,14 @@ describe('CLI and setup guards', () => {
     expect(browser.close).toHaveBeenCalledOnce();
   });
 
-  it('supports all requested arguments and separates CSV from application settings', () => {
-    expect(parseRunOptions(['node', 'tvt', '--release', 'Test Release', '--minutes', '30', '--headed', '--service', 'kafka-ui', '--config', 'alternate.csv', '--settings', 'local.json', '--keep-temp', '--overwrite'])).toEqual({
+  it('defaults to the Excel service list', () => {
+    expect(parseRunOptions(['node', 'tvt', '--release', 'Test Release']).configPath).toBe('services.xlsx');
+  });
+
+  it.each(['alternate.xlsx', 'alternate.csv'])('supports all requested arguments and separates %s from application settings', (configPath) => {
+    expect(parseRunOptions(['node', 'tvt', '--release', 'Test Release', '--minutes', '30', '--headed', '--service', 'kafka-ui', '--config', configPath, '--settings', 'local.json', '--keep-temp', '--overwrite'])).toEqual({
       release: 'Test Release', minutes: 30, headed: true, service: 'kafka-ui',
-      configPath: 'alternate.csv', settingsPath: 'local.json', keepTemp: true, overwrite: true,
+      configPath, settingsPath: 'local.json', keepTemp: true, overwrite: true,
     });
   });
 

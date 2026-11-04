@@ -16,15 +16,24 @@ export interface Service {
   serviceName: string;
   namespace: string;
   workload: string;
+  expectedVersion?: string;
 }
 
 export type CaptureStatus = 'CAPTURED' | 'FAILED' | 'NOT ATTEMPTED';
 export type ResultStatus = 'PASS' | 'PASS WITH WARNING' | 'FAILED';
 
+export interface VersionCheck {
+  status: 'MATCHED' | 'MISMATCH' | 'NOT FOUND' | 'AMBIGUOUS';
+  deployedVersion: string | undefined;
+  message: string | undefined;
+}
+
 export interface ServiceResult extends Service {
   sheetName: string;
   overviewStatus: CaptureStatus;
   logsStatus: CaptureStatus;
+  versionStatus: VersionCheck['status'] | 'NOT REQUESTED' | 'NOT CHECKED' | 'CHANGED';
+  deployedVersion: string | undefined;
   result: ResultStatus;
   remarks: string[];
   captureTimestamp: Date | null;

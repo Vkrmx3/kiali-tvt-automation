@@ -4,7 +4,7 @@ import path from 'node:path';
 import ExcelJS from 'exceljs';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createSheetNames, safeExcelText, sheetHyperlink } from '../src/naming.js';
-import { createServiceResult } from '../src/results.js';
+import { createServiceResult, finishResult } from '../src/results.js';
 import { fitImage, SUMMARY_HEADER_ROW, verifyWorkbook, writeWorkbook } from '../src/workbook.js';
 import { createSampleResults, sampleMetadata } from './fixtures.js';
 
@@ -30,7 +30,8 @@ describe('workbook integration (generated PNGs, no Kiali)', () => {
     expect(summary.autoFilter).toBeTruthy();
     expect(summary.getCell('C7').text).toContain('11:00:00');
     const service = workbook.getWorksheet('sample-service')!;
-    expect(service.getCell('A12').value).toEqual({ text: 'Back to Summary', hyperlink: sheetHyperlink('Summary') });
+    expect(service.getCell('A15').value).toEqual({ text: 'Back to Summary', hyperlink: sheetHyperlink('Summary') });
+    expect(service.getCell('C13').value).toBe('NOT REQUESTED');
     expect(service.pageSetup).toMatchObject({ orientation: 'landscape', fitToWidth: 1 });
     const images = service.getImages();
     expect(images).toHaveLength(2);
@@ -47,6 +48,60 @@ describe('workbook integration (generated PNGs, no Kiali)', () => {
     expect(failed.getImages()).toHaveLength(2);
     await rm(path.join(directory, '01-overview.png'));
     expect((await verifyWorkbook(output.path, results)).imageCount).toBe(4);
+  });
+
+  it('records deployment version outcomes without discarding captured evidence and verifies their read-back', async () => {
+    const [sample] = await createSampleResults(directory);
+    const cases = [
+      ['MATCHED', '1.2.5', 'PASS'],
+      ['MISMATCH', '1.2.4', 'FAILED'],
+      ['NOT FOUND', undefined, 'FAILED'],
+      ['AMBIGUOUS', '1.2.4, 1.2.5', 'FAILED'],
+      ['CHANGED', '1.2.4', 'FAILED'],
+      ['NOT CHECKED', undefined, 'FAILED'],
+    ] as const;
+    const results = cases.map(([versionStatus, deployedVersion], index) => ({
+      ...sample!, serviceName: `version-check-${index}`, sheetName: `version-check-${index}`,
+      expectedVersion: '1.2.5', versionStatus, deployedVersion, remarks: [],
+    }));
+    const output = await writeWorkbook(sampleMetadata, results, directory);
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.readFile(output.path);
+    const summary = workbook.getWorksheet('Summary')!;
+    expect([10, 11, 12].map((column) => summary.getCell(SUMMARY_HEADER_ROW, column).value)).toEqual(['Expected Version', 'Deployed Version', 'Version Check']);
+    for (const [index, result] of results.entries()) {
+      const expected = cases[index]!;
+      const row = SUMMARY_HEADER_ROW + index + 1;
+      expect(result.result).toBe(expected[2]);
+      expect(summary.getCell(row, 7).value).toBe(expected[2]);
+      expect(summary.getCell(row, 10).value).toBe('1.2.5');
+      expect(summary.getCell(row, 11).value).toBe(expected[1] ?? 'Not observed');
+      expect(summary.getCell(row, 12).value).toBe(expected[0]);
+      const sheet = workbook.getWorksheet(result.sheetName)!;
+      expect(sheet.getCell('C11').value).toBe('1.2.5');
+      expect(sheet.getCell('C12').value).toBe(expected[1] ?? 'Not observed');
+      expect(sheet.getCell('C13').value).toBe(expected[0]);
+      expect(sheet.getImages()).toHaveLength(2);
+      expect(sheet.getImages()[0]!.range.tl.nativeRow).toBeGreaterThan(15);
+    }
+    summary.getCell(SUMMARY_HEADER_ROW + 1, 11).value = '9.9.9';
+    await workbook.xlsx.writeFile(output.path);
+    await expect(verifyWorkbook(output.path, results)).rejects.toThrow('deployment version validation results are missing or inconsistent');
+  });
+
+  it('requires an observed matching version before a fully captured service can pass', () => {
+    const result = createServiceResult({ serviceName: 'app', namespace: 'test', workload: 'app', expectedVersion: '1.2.5' }, 'app');
+    result.overviewStatus = 'CAPTURED';
+    result.logsStatus = 'CAPTURED';
+    finishResult(result);
+    expect(result.result).toBe('FAILED');
+    result.versionStatus = 'MATCHED';
+    result.deployedVersion = '1.2.4';
+    finishResult(result);
+    expect(result.result).toBe('FAILED');
+    result.deployedVersion = '1.2.5';
+    finishResult(result);
+    expect(result.result).toBe('PASS');
   });
 
   it('writes every service, even with no screenshots, and safely handles formula-like names', async () => {

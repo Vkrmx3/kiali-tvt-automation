@@ -1,5 +1,47 @@
 # Runtime Validation Report
 
+## Overview Version Validation (2026-11-04)
+
+Scope: per-service Expected Version input, read-only comparison against the exact
+Overview Labels `version=...` label, collection outcomes, and report integrity.
+No corporate Kiali session, live workload, or desktop Excel application was opened.
+The Logs implementation and deferred speed optimizations were not changed.
+
+| Check | Status | Exit code | Evidence |
+| --- | --- | --- | --- |
+| `node node_modules/typescript/bin/tsc --noEmit --pretty false` | PASS | 0 | Strict TypeScript validation. |
+| Full Vitest run with `--testTimeout=90000` | PASS | 0 | 180 passed, 0 failed, 0 skipped, across 7 files. |
+| Default Excel input through collection and output | PASS | 0 | Expected/actual values, failure exit code for a mismatch, success for a selected matching service, retained screenshots, and workbook read-back. |
+| Input workbook update | PASS | 0 | Namespace and Service Name preserved; Expected Version added as a text column; missing values rejected before browser startup. |
+
+Machine-readable evidence: [temp/version-validation-tests.json](temp/version-validation-tests.json).
+The default 45-second test limit initially timed out both full CLI workflow tests
+(178 passed, 2 timed out). A sequential rerun with a validation-only 90-second
+per-test limit passed every unchanged assertion; those two workflows completed
+in approximately 15.1 and 12.4 seconds. Application timeouts and the repository's
+test configuration were not changed. The initially interrupted type-check batch
+was rerun independently and passed.
+
+New coverage includes exact matches and mismatches, the separate numeric Version
+field, namespaced label keys, hidden text, missing/conflicting labels, multiple
+Labels cards, PatternFly card variants, changes during screenshot capture,
+confirmed authentication failures, continuation of Logs and later services,
+the actual tsx CLI runtime, and saved version-result tampering detection.
+
+Environment: Windows, Node.js 22.23.4, existing Playwright Chromium and Vitest.
+The loopback fixture server and browser started successfully in the tests. No
+database or container infrastructure is required. Local validation: PASS.
+
+Live Kiali DOM compatibility and deployed versions remain UNVERIFIED. Fill every
+Expected Version cell in [services.xlsx](services.xlsx), then validate one service
+inside VDI. The input values are deliberately blank; the observed screenshot
+version was not assumed to be the desired release target.
+
+## Earlier Validation Record
+
+The following sections retain the previous validation history, not a claim that
+the deferred performance changes were reintroduced.
+
 Date: 2026-10-21
 
 Target: local kiali-tvt-automation CLI. No corporate Kiali login or live workload

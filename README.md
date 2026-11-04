@@ -1,9 +1,10 @@
 # kiali-tvt-automation
 
-A local, read-only TypeScript CLI for Kiali post-release evidence. It reads enabled
-workloads from CSV, opens each workload directly, captures Overview and Logs, and
-embeds the images in one `.xlsx` workbook. Microsoft Excel is not required to
-generate or verify the workbook. There is no web application, CI/CD integration,
+A local, read-only TypeScript CLI for Kiali post-release evidence. It reads a
+three-column service list from [services.xlsx](services.xlsx), opens each workload
+directly, checks its deployment version, captures Overview and Logs, and embeds the images in one output `.xlsx`
+workbook. Microsoft Excel is not required to run the utility or generate and
+verify the report. There is no web application, CI/CD integration,
 Python, Electron, or Kubernetes mutation client.
 
 ## Prerequisites
@@ -13,7 +14,7 @@ Python, Electron, or Kubernetes mutation client.
 - Access to the corporate network/VPN and the configured Kiali site.
 - A Kiali account allowed to view the required namespaces, workloads, and pod logs.
 - Sufficient local disk space for screenshots and the finished workbook.
-
+mentation
 Development and automated checks have been run on Windows with Node 22.13.1.
 The code uses platform-independent filesystem APIs. macOS and Linux have not
 been validated on this workstation.
@@ -107,7 +108,8 @@ After logging in, run only one service initially:
 npm.cmd run tvt -- --release "VDI-Startup-Check" --service "security-movement-out-v1" --minutes 1440 --headed --keep-temp
 ```
 
-Ensure that service is enabled in the CSV. Run this inside VDI; do not attempt
+Ensure that service is listed in [services.xlsx](services.xlsx) with its expected
+release version filled in. Run this inside VDI; do not attempt
 production Kiali access from an outside machine.
 
 Review the Summary and service sheet. Confirm that the expected workload,
@@ -119,8 +121,9 @@ pane. Check the PNGs in the release's temporary directory if needed.
 Automated browser tests use local fixtures, not your corporate Kiali deployment.
 Kiali versions can differ in markup and authentication. Validate this limited
 run and adjust the centralized locators in `src/kiali.ts` before collecting the
-full service list. A PASS means evidence was collected, not that the service's
-health or log contents passed a business acceptance check.
+full service list. A PASS means evidence was collected and any supplied expected
+version matched. It does not mean the service's health or log contents passed a
+business acceptance check.
 
 ## Normal Execution
 
@@ -129,7 +132,7 @@ npm run tvt -- --release "Release-2026-10-09"
 npm run tvt -- --release "Release-2026-10-09" --minutes 1440
 npm run tvt -- --release "Release-2026-10-09" --headed
 npm run tvt -- --release "Release-2026-10-09" --service "kafka-ui"
-npm run tvt -- --release "Release-2026-10-09" --config "services.csv"
+npm run tvt -- --release "Release-2026-10-09" --config "team-services.xlsx"
 ```
 
 | Argument | Meaning |
@@ -137,8 +140,8 @@ npm run tvt -- --release "Release-2026-10-09" --config "services.csv"
 | `--release <name>` | Required, non-empty release label, at most 200 characters. The original label is displayed; the filename is sanitized. |
 | `--minutes <integer>` | Override the custom log window, from 1 through 1440 minutes. Defaults to the configured duration, now 1440 minutes (24 hours). |
 | `--headed` | Show the configured Chromium or Edge browser. Otherwise use `defaultHeadless`. |
-| `--service <name>` | Process one enabled service by exact, case-sensitive `serviceName`. |
-| `--config <path>` | Service CSV, default `services.csv`. This is **not** the JSON settings path. |
+| `--service <name>` | Process one service by exact, case-sensitive `Service Name`. |
+| `--config <path>` | Service Excel workbook or legacy CSV, default [services.xlsx](services.xlsx). This is **not** the JSON settings path. |
 | `--settings <path>` | Application settings JSON, default `config.json`. |
 | `--keep-temp` | Keep screenshots after workbook verification. |
 | `--overwrite` | Explicitly allow replacement of the original release workbook. |
@@ -149,7 +152,84 @@ from the current directory, so run the documented commands from the project
 root. Absolute input paths are also supported. Auth, output, and temporary
 directories remain inside the project directory.
 
-## Service CSV
+## Service List (Excel)
+
+Open [services.xlsx](services.xlsx) directly in VS Code using **SpreadJS XLSX Editor**
+(`mescius.spreadjs-xlsx-editor`). This workspace recommends the extension and opens
+`.xlsx` and `.xlsm` files with its **SpreadJS Designer**. Install the recommended
+extension from VS Code's Extensions view if it is not already installed.
+
+If an already-open tab still uses the previous viewer, right-click the tab and
+choose **Open with SpreadJS**, or **Reopen Editor With... > SpreadJS Designer**.
+The full ribbon is enabled. You can view and edit the service list inside VS Code;
+a separate Excel application is not required. No activation key is required,
+but the publisher notes that a trial watermark may appear without a commercial
+license.
+
+The `Services` sheet contains three columns. The current service names and
+namespaces are prefilled; enter the expected version for each service before
+running. The version cells are initially blank, not inferred from a deployment.
+
+| Namespace | Service Name | Expected Version |
+| --- | --- | --- |
+| kafka | kafka-ui | |
+| backoffice | anz-account-management-service-v1 | |
+| backoffice | anz-adapter-service-v1 | |
+
+1. Add one row for each service to check.
+2. Enter the Kiali namespace first, then the exact service/workload name.
+3. Enter the expected release version as text, for example `1.2.5`.
+4. Remove a row, or clear all three cells, to leave that service out of future runs.
+5. Save your changes with **Ctrl+S** before running the usual TVT command.
+
+To insert or delete rows, select their row numbers and use **Insert** or **Delete**
+from the right-click menu or the **Home** ribbon. Select column letters for the
+equivalent column operations. Keep the three required columns, **Namespace**,
+**Service Name**, and **Expected Version**; additional named columns are not
+accepted by the utility. The version column is text-formatted to preserve values
+such as `1.0` and `1.2.5`; numeric cells and formulas are not accepted.
+
+There is no separate Workload or Enabled column. **Service Name is also the
+workload name**, and every non-empty row is included. Hidden or filtered rows
+are still included; filtering the sheet does not select services for a run.
+Blank rows are ignored. Use `--service` to run just one named service without
+editing the list.
+
+Keep `Namespace`, `Service Name`, and `Expected Version` in the first row; header
+order and letter case do not matter. Use plain text, not formulas. Missing values and duplicate
+names are reported with Excel row numbers before a browser opens. The utility
+reads the `Services` sheet, or the only sheet if your workbook has just one.
+Save as `.xlsx`, not the older `.xls` format. Do not put credentials or tokens
+in the service list. Generated reports remain separate in the output directory.
+
+### Deployment Version Validation
+
+The Overview check reads the exact `version=...` label inside the visible
+**Labels** card. It does not use the separate numeric **Version** field,
+annotations, graph text, or the different `app.kubernetes.io/version` label.
+The expected and deployed values must match exactly, including case and prefixes:
+`1.2.5`, `v1.2.5`, and `1.2.50` are different values.
+
+The Summary and each service sheet show **Expected Version**, **Deployed Version**,
+and **Version Check**. A mismatch, missing label, or ambiguous Labels section
+makes the service `FAILED`, even if Overview and Logs were captured. The Overview
+image is retained as evidence, and Logs and subsequent services are still attempted.
+If the version changes during capture, the check is `CHANGED` and the potentially
+misleading Overview image is discarded. An unreachable Overview remains
+`NOT CHECKED`; no deployed version is invented. Authentication failures retain
+the existing stop-and-retry protections.
+
+### Existing CSV Files
+
+The original [services.csv](services.csv) remains supported for compatibility,
+but it is **not used by default**. Editing it does not change a normal Excel-based
+run. To use it explicitly:
+
+```sh
+npm run tvt -- --release "Release-2026-10-09" --config "services.csv"
+```
+
+Legacy CSV files retain their four-column format and behavior:
 
 ```csv
 serviceName,namespace,workload,enabled
@@ -162,6 +242,9 @@ anz-adapter-service-v1,backoffice,anz-adapter-service-v1,true
   the sheet and Summary even when the tab name must be shortened.
 - `namespace` and `workload` identify the exact Kiali workload.
 - `enabled` accepts `true`, `false`, or blank (default `true`), case-insensitively.
+- An optional fifth column, `expectedVersion`, enables the same deployment check.
+  When that column is present, each row needs a version. Without it, legacy CSV
+  runs remain screenshot-only and show `NOT REQUESTED` in Version Check.
 - Headers and values are trimmed; blank lines and a UTF-8 BOM are supported.
   Use normal CSV quoting for commas or quotes inside values.
 - All four column headers are required. Required identity fields must be
@@ -318,7 +401,8 @@ after successful workbook creation, even when service failures set exit code 1.
 
 The first worksheet is **Summary**, containing run metadata and a filterable,
 frozen-header table with No., Service Name, Namespace, Workload, Overview, Logs,
-Result, Remarks, and Captured At. Service names link to their worksheets.
+Result, Remarks, Captured At, Expected Version, Deployed Version, and Version
+Check. Service names link to their worksheets.
 
 Results are `PASS`, `PASS WITH WARNING`, or `FAILED`, with green, orange, and
 light-red formatting. "Successful" counts PASS only; warnings are a separate,
@@ -327,7 +411,8 @@ service. Timestamps are displayed as Sydney-local text including the timezone,
 using `Australia/Sydney` daylight-saving rules rather than a fixed UTC offset.
 
 Each service sheet includes the full name, namespace, workload, release,
-capture timestamp, result, remarks, elapsed time, and a link back to Summary.
+capture timestamp, result, remarks, elapsed time, expected/deployed versions,
+version-check status, and a link back to Summary.
 Overview is above Logs. Images preserve aspect ratio inside a consistent
 maximum 1080-by-1400-pixel area; the next heading is placed using the scaled
 image height. Missing captures have visible failure messages, and a diagnostic
@@ -343,7 +428,8 @@ formulas, macros, or external workbook links.
 
 Before publishing, the workbook is reopened with ExcelJS to check the first
 sheet, worksheet count, every Summary row, service sheets, valid internal
-hyperlinks, embedded PNG payloads, absence of formulas, and a non-empty file.
+hyperlinks, expected/deployed versions and check statuses, embedded PNG payloads,
+absence of formulas, and a non-empty file.
 
 ## Temporary Evidence and Failures
 

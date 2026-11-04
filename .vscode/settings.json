@@ -1,0 +1,7 @@
+{
+  "workbench.editorAssociations": {
+    "*.xlsx": "spreadjs.designer",
+    "*.xlsm": "spreadjs.designer"
+  },
+  "spreadjs.ribbonMode": "classic"
+}

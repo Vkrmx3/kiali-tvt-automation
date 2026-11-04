@@ -6,6 +6,8 @@ export function createServiceResult(service: Service, sheetName: string): Servic
     sheetName,
     overviewStatus: 'NOT ATTEMPTED',
     logsStatus: 'NOT ATTEMPTED',
+    versionStatus: service.expectedVersion === undefined ? 'NOT REQUESTED' : 'NOT CHECKED',
+    deployedVersion: undefined,
     result: 'FAILED',
     remarks: [],
     captureTimestamp: null,
@@ -17,7 +19,8 @@ export function createServiceResult(service: Service, sheetName: string): Servic
 }
 
 export function finishResult(result: ServiceResult): void {
-  result.result = result.overviewStatus !== 'CAPTURED' || result.logsStatus !== 'CAPTURED'
+  result.result = result.overviewStatus !== 'CAPTURED' || result.logsStatus !== 'CAPTURED' ||
+    result.expectedVersion !== undefined && (result.versionStatus !== 'MATCHED' || result.deployedVersion !== result.expectedVersion)
     ? 'FAILED'
     : result.remarks.length ? 'PASS WITH WARNING' : 'PASS';
 }

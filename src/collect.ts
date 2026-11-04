@@ -1,7 +1,7 @@
 import { mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import type { BrowserContext, Page } from 'playwright';
-import { assertWorkloadView, canCaptureDiagnostic, getAuthenticationError, prepareWorkloadPage, workloadUrl } from './kiali.js';
+import { assertWorkloadView, canCaptureDiagnostic, checkWorkloadVersion, getAuthenticationError, prepareWorkloadPage, workloadUrl } from './kiali.js';
 import { AuthenticationError, TvtError, logDiagnosticUrl, progress, safeErrorMessage } from './logger.js';
 import { createSheetNames, safePathSegment } from './naming.js';
 import { createServiceResult, finishResult } from './results.js';
@@ -47,9 +47,25 @@ export async function collectServices(context: BrowserContext, services: Service
               const activePage = page;
               try {
                 const notes = await prepareWorkloadPage(activePage, config, service, tab, logsDurationSeconds, logsToMilliseconds);
+                const versionCheck = tab === 'info' && service.expectedVersion !== undefined
+                  ? await checkWorkloadVersion(activePage, service.expectedVersion) : undefined;
+                if (versionCheck) {
+                  result.versionStatus = versionCheck.status;
+                  result.deployedVersion = versionCheck.deployedVersion;
+                  if (versionCheck.message && !result.remarks.includes(versionCheck.message)) result.remarks.push(versionCheck.message);
+                  report(index, services.length, `Version ${versionCheck.status}: expected ${service.expectedVersion}; observed ${versionCheck.deployedVersion ?? 'not found'}`);
+                }
                 const destination = path.join(directory, tab === 'info' ? '01-overview.png' : '02-logs.png');
                 notes.push(...await captureScreenshot(activePage, config, destination, kind, async () => {
                   await assertWorkloadView(activePage, config, service, tab, logsDurationSeconds, logsToMilliseconds);
+                  if (versionCheck && service.expectedVersion !== undefined) {
+                    const current = await checkWorkloadVersion(activePage, service.expectedVersion);
+                    if (current.status !== versionCheck.status || current.deployedVersion !== versionCheck.deployedVersion) {
+                      result.versionStatus = 'CHANGED';
+                      result.deployedVersion = current.deployedVersion;
+                      throw new TvtError('VERSION_CHANGED', 'The Overview version label changed during capture. No potentially misleading Overview screenshot was saved; rerun the version check.');
+                    }
+                  }
                 }));
                 result.remarks.push(...notes);
                 if (attempt) result.remarks.push(`${label}: recovered after one authentication-page retry.`);

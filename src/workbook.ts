@@ -120,11 +120,15 @@ function metadataRow(sheet: ExcelJS.Worksheet, row: number, label: string, value
   sheet.getRow(row).height = Math.max(23, Math.ceil(String(value).length / 90) * 16);
 }
 
+function versionColor(status: ServiceResult['versionStatus']): string {
+  return status === 'MATCHED' ? STATUS_COLORS.PASS : status === 'NOT REQUESTED' ? 'F3F6FA' : STATUS_COLORS.FAILED;
+}
+
 function buildSummary(workbook: ExcelJS.Workbook, metadata: RunMetadata, results: ServiceResult[]): void {
   const sheet = workbook.addWorksheet('Summary');
   styleSheet(sheet);
-  sheet.columns = [6, 44, 24, 48, 20, 20, 25, 80, 32].map((width) => ({ width }));
-  band(sheet, 1, 'I', 'Kiali Post-Release TVT Evidence');
+  sheet.columns = [6, 44, 24, 48, 20, 20, 25, 80, 32, 24, 24, 22].map((width) => ({ width }));
+  band(sheet, 1, 'L', 'Kiali Post-Release TVT Evidence');
   sheet.getRow(1).height = 36;
   const counts = resultCounts(results);
   const details: Array<[string, string | number]> = [
@@ -139,9 +143,9 @@ function buildSummary(workbook: ExcelJS.Workbook, metadata: RunMetadata, results
     ['Services with warnings', counts.warnings],
     ['Failed services', counts.failed],
   ];
-  details.forEach(([label, value], index) => metadataRow(sheet, index + 4, label, value, 'I'));
+  details.forEach(([label, value], index) => metadataRow(sheet, index + 4, label, value, 'L'));
   const header = sheet.getRow(SUMMARY_HEADER_ROW);
-  header.values = ['No.', 'Service Name', 'Namespace', 'Workload', 'Overview', 'Logs', 'Result', 'Remarks', 'Captured At'];
+  header.values = ['No.', 'Service Name', 'Namespace', 'Workload', 'Overview', 'Logs', 'Result', 'Remarks', 'Captured At', 'Expected Version', 'Deployed Version', 'Version Check'];
   header.height = 28;
   header.eachCell((cell) => {
     cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: TITLE_COLOR } };
@@ -157,6 +161,9 @@ function buildSummary(workbook: ExcelJS.Workbook, metadata: RunMetadata, results
       result.overviewStatus, result.logsStatus, result.result,
       safeExcelText(result.remarks.join(' ') || 'None'),
       result.captureTimestamp ? formatSydneyTime(result.captureTimestamp) : 'Not captured',
+      safeExcelText(result.expectedVersion ?? 'Not supplied'),
+      safeExcelText(result.deployedVersion ?? 'Not observed'),
+      result.versionStatus,
     ];
     row.height = Math.max(36, Math.ceil(result.remarks.join(' ').length / 65) * 15, Math.ceil(result.serviceName.length / 35) * 15);
     row.eachCell((cell) => {
@@ -168,11 +175,13 @@ function buildSummary(workbook: ExcelJS.Workbook, metadata: RunMetadata, results
     row.getCell(2).font = { name: 'Calibri', color: { argb: '0563C1' }, underline: true };
     row.getCell(7).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: STATUS_COLORS[result.result] } };
     row.getCell(7).font = { name: 'Calibri', bold: true };
+    row.getCell(12).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: versionColor(result.versionStatus) } };
+    row.getCell(12).font = { name: 'Calibri', bold: true };
   });
   sheet.views = [{ state: 'frozen', ySplit: SUMMARY_HEADER_ROW, showGridLines: false }];
-  sheet.autoFilter = { from: { row: SUMMARY_HEADER_ROW, column: 1 }, to: { row: SUMMARY_HEADER_ROW + results.length, column: 9 } };
+  sheet.autoFilter = { from: { row: SUMMARY_HEADER_ROW, column: 1 }, to: { row: SUMMARY_HEADER_ROW + results.length, column: 12 } };
   sheet.pageSetup.printTitlesRow = `${SUMMARY_HEADER_ROW}:${SUMMARY_HEADER_ROW}`;
-  sheet.pageSetup.printArea = `A1:I${SUMMARY_HEADER_ROW + results.length}`;
+  sheet.pageSetup.printArea = `A1:L${SUMMARY_HEADER_ROW + results.length}`;
 }
 
 function imageSection(workbook: ExcelJS.Workbook, sheet: ExcelJS.Worksheet, row: number, title: string, image: EvidenceImage | undefined, missingText: string): number {
@@ -210,13 +219,18 @@ function buildServiceSheet(workbook: ExcelJS.Workbook, metadata: RunMetadata, re
     ['Release name', metadata.release], ['Capture timestamp', result.captureTimestamp ? formatSydneyTime(result.captureTimestamp) : 'Not captured'],
     ['Result', result.result], ['Remarks', result.remarks.join(' ') || 'None'],
     ['Elapsed', `${(result.elapsedMilliseconds / 1000).toFixed(1)} seconds`],
+    ['Expected version', result.expectedVersion ?? 'Not supplied'],
+    ['Deployed version (Labels)', result.deployedVersion ?? 'Not observed'],
+    ['Version check', result.versionStatus],
   ];
   details.forEach(([label, value], index) => metadataRow(sheet, index + 3, label, value, 'L'));
   sheet.getCell('C8').fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: STATUS_COLORS[result.result] } };
-  sheet.mergeCells('A12:D12');
-  sheet.getCell('A12').value = { text: 'Back to Summary', hyperlink: sheetHyperlink('Summary') };
-  sheet.getCell('A12').font = { color: { argb: '0563C1' }, underline: true };
-  let nextRow = imageSection(workbook, sheet, 14, 'Overview', evidence.overview, `Overview screenshot unavailable (${result.overviewStatus}). See Remarks.`);
+  sheet.getCell('C13').fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: versionColor(result.versionStatus) } };
+  const backRow = details.length + 4;
+  sheet.mergeCells(`A${backRow}:D${backRow}`);
+  sheet.getCell(`A${backRow}`).value = { text: 'Back to Summary', hyperlink: sheetHyperlink('Summary') };
+  sheet.getCell(`A${backRow}`).font = { color: { argb: '0563C1' }, underline: true };
+  let nextRow = imageSection(workbook, sheet, backRow + 2, 'Overview', evidence.overview, `Overview screenshot unavailable (${result.overviewStatus}). See Remarks.`);
   nextRow = imageSection(workbook, sheet, nextRow, 'Logs', evidence.logs, `Logs screenshot unavailable (${result.logsStatus}). See Remarks.`);
   if (evidence.error) nextRow = imageSection(workbook, sheet, nextRow, 'Diagnostic capture (error page)', evidence.error, 'Diagnostic capture unavailable.');
   sheet.pageSetup.printArea = `A1:L${nextRow}`;
@@ -240,6 +254,10 @@ export async function verifyWorkbook(filePath: string, results: readonly Service
     const value = summary.getCell(SUMMARY_HEADER_ROW + index + 1, 2).value;
     if (!sheet || !value || typeof value !== 'object' || !('hyperlink' in value) || value.hyperlink !== sheetHyperlink(result.sheetName) || value.text !== safeExcelText(result.serviceName)) {
       throw new TvtError('WORKBOOK_VALIDATION', 'Workbook verification failed: a service worksheet or internal Summary hyperlink is missing.');
+    }
+    const versionValues = [result.expectedVersion ?? 'Not supplied', result.deployedVersion ?? 'Not observed', result.versionStatus].map(safeExcelText);
+    if (versionValues.some((expected, offset) => summary.getCell(SUMMARY_HEADER_ROW + index + 1, 10 + offset).value !== expected || sheet.getCell(11 + offset, 3).value !== expected)) {
+      throw new TvtError('WORKBOOK_VALIDATION', 'Workbook verification failed: deployment version validation results are missing or inconsistent.');
     }
     const expectedImages = [result.overviewScreenshotPath, result.logsScreenshotPath, result.errorScreenshotPath].filter(Boolean).length;
     const images = sheet.getImages();

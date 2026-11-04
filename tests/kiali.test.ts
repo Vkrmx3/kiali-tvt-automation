@@ -7,13 +7,14 @@ import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
+import ExcelJS from 'exceljs';
 import { chromium, type Browser, type BrowserContext } from 'playwright';
 import { PNG } from 'pngjs';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { collectServices } from '../src/collect.js';
 import { parseConfig } from '../src/config.js';
-import { assertAuthenticated, assertWorkloadView, enableReadOnlyRequests, isAuthenticationPage, prepareWorkloadPage } from '../src/kiali.js';
-import { runTvt } from '../src/run-tvt.js';
+import { assertAuthenticated, assertWorkloadView, checkWorkloadVersion, enableReadOnlyRequests, isAuthenticationPage, prepareWorkloadPage } from '../src/kiali.js';
+import { parseRunOptions, runTvt } from '../src/run-tvt.js';
 import { captureScreenshot } from '../src/screenshots.js';
 import { verifyWorkbook } from '../src/workbook.js';
 import type { AppConfig, RunOptions, ServiceResult } from '../src/types.js';
@@ -33,6 +34,12 @@ function fixtureHtml(workload: string, tab: string): string {
   let controls = '';
   let content = '<section><h2>Health</h2><p>Healthy: all local fixture pods are ready.</p></section>';
   let script = '';
+  if (tab === 'info') {
+    const version = workload === 'version-mismatch' ? '1.2.4' : '1.2.5';
+    content += `<section><h2>Version</h2><p>625642981</p></section><section><h2>Labels</h2><span>app=${workload}</span>
+      ${workload === 'version-missing' ? '' : `<span data-testid="version-label">version=${version}</span>`}
+      ${workload === 'version-ambiguous' ? '<span>version=1.2.4</span>' : ''}</section>`;
+  }
   if (workload === 'generic-error') content = '<div role="alert">Could not fetch Workload.</div>';
   if (tab === 'logs') {
     const matchingName = workload === 'ambiguous-container' ? 'different-app' : workload;
@@ -194,12 +201,101 @@ async function collect(names: string[]): Promise<ServiceResult[]> {
 }
 
 describe('real Chromium, loopback Kiali fixtures only', () => {
-  it('executes Logs scrolling through the actual tsx runtime used by the CLI', async () => {
+  it.each([
+    ['version-match', 'MATCHED', '1.2.5', 'PASS'],
+    ['version-mismatch', 'MISMATCH', '1.2.4', 'FAILED'],
+    ['version-missing', 'NOT FOUND', undefined, 'FAILED'],
+    ['version-ambiguous', 'AMBIGUOUS', '1.2.4, 1.2.5', 'FAILED'],
+  ] as const)('records deployment version validation for %s and continues Logs and later services', async (workload, versionStatus, deployedVersion, status) => {
+    const results = await collectServices(context, [
+      { serviceName: workload, namespace: 'test', workload, expectedVersion: '1.2.5' },
+      { serviceName: 'good-app', namespace: 'test', workload: 'good-app', expectedVersion: '1.2.5' },
+    ], config, directory, 1800, undefined, () => undefined);
+    expect(results[0]).toMatchObject({ versionStatus, deployedVersion, result: status, overviewStatus: 'CAPTURED', logsStatus: 'CAPTURED' });
+    expect(PNG.sync.read(await readFile(results[0]!.overviewScreenshotPath!)).width).toBe(1920);
+    expect(results[1]).toMatchObject({ versionStatus: 'MATCHED', deployedVersion: '1.2.5', result: 'PASS' });
+    if (status === 'FAILED') expect(results[0]!.remarks.join(' ')).toMatch(/Deployment version/);
+  });
+
+  it('rejects deployment version evidence that changes during screenshot capture', async () => {
+    const page = await context.newPage();
+    const newPage = vi.spyOn(context, 'newPage').mockResolvedValueOnce(page);
+    const originalScreenshot = page.screenshot.bind(page);
+    let changed = false;
+    const screenshot = vi.spyOn(page, 'screenshot').mockImplementation(async (options) => {
+      const bytes = await originalScreenshot(options);
+      if (!changed && new URL(page.url()).searchParams.get('tab') === 'info') {
+        changed = true;
+        await page.getByTestId('version-label').evaluate((element) => { element.textContent = 'version=1.2.4'; });
+      }
+      return bytes;
+    });
+    try {
+      const [result] = await collectServices(context, [
+        { serviceName: 'good-app', namespace: 'test', workload: 'good-app', expectedVersion: '1.2.5' },
+      ], config, directory, 1800, undefined, () => undefined);
+      expect(result).toMatchObject({ versionStatus: 'CHANGED', result: 'FAILED', overviewStatus: 'FAILED', logsStatus: 'CAPTURED' });
+      expect(result!.overviewScreenshotPath).toBeUndefined();
+      expect(result!.remarks.join(' ')).toContain('version label changed during capture');
+      expect(await readdir(path.join(directory, 'good-app'))).not.toContain('01-overview.png');
+    } finally {
+      screenshot.mockRestore();
+      newPage.mockRestore();
+    }
+  });
+
+  it('does not perform deployment version checks on confirmed authentication pages', async () => {
+    const results = await collectServices(context, [
+      { serviceName: 'expired', namespace: 'test', workload: 'expired', expectedVersion: '1.2.5' },
+      { serviceName: 'good-app', namespace: 'test', workload: 'good-app', expectedVersion: '1.2.5' },
+    ], config, directory, 1800, undefined, () => undefined);
+    expect(results.every((result) => result.versionStatus === 'NOT CHECKED' && result.result === 'FAILED')).toBe(true);
+    expect(results.every((result) => result.deployedVersion === undefined && result.overviewScreenshotPath === undefined)).toBe(true);
+    expect(results[1]!.remarks.join(' ')).toContain('earlier authentication failure');
+  });
+
+  it.each([
+    '<section><h2>Labels</h2><span><b>version</b>=<span>1.2.5</span></span></section>',
+    '<div class="pf-v5-c-card"><div class="pf-v5-c-card__title">Labels</div><div><span>app=fixture</span><span>version=1.2.5</span></div></div>',
+    '<div class="pf-v6-c-card"><div class="pf-v6-c-card__title"><div class="pf-v6-c-card__title-text">Labels</div></div><div><span>version=1.2.5</span></div></div>',
+  ])('matches an Overview version only within its Labels card: %s', async (labels) => {
+    const page = await context.newPage();
+    await page.setContent(`<main><section><h2>Version</h2><p>625642981</p></section>${labels}</main>`);
+    expect(await checkWorkloadVersion(page, '1.2.5')).toEqual({ status: 'MATCHED', deployedVersion: '1.2.5', message: undefined });
+  });
+
+  it.each(['1.2.50', 'v1.2.5', '1.2.4'])('requires an exact Overview version match for %s', async (version) => {
+    const page = await context.newPage();
+    await page.setContent(`<main><section><h2>Labels</h2><span>version=${version}</span></section></main>`);
+    expect(await checkWorkloadVersion(page, '1.2.5')).toMatchObject({ status: 'MISMATCH', deployedVersion: version });
+  });
+
+  it.each([
+    '<section><h2>Version</h2><p>1.2.5</p></section>',
+    '<section><h2>Labels</h2><span>app.kubernetes.io/version=1.2.5</span></section><section><h2>Annotations</h2><span>version=1.2.5</span></section>',
+    '<section><h2>Labels</h2><span hidden>version=1.2.5</span><span style="display:none">version=1.2.5</span><span aria-hidden="true">version=1.2.5</span></section>',
+    '<section><h2>Labels</h2><h2>Annotations</h2><span>version=1.2.5</span></section>',
+  ])('does not infer an Overview version from metadata, unrelated labels, or hidden text: %s', async (content) => {
+    const page = await context.newPage();
+    await page.setContent(`<main>${content}</main>`);
+    expect(await checkWorkloadVersion(page, '1.2.5')).toMatchObject({ status: 'NOT FOUND', deployedVersion: undefined });
+  });
+
+  it.each([
+    '<section><h2>Labels</h2><span>version=1.2.5</span><span>version=1.2.4</span></section>',
+    '<section><h2>Labels</h2><span>version=1.2.5</span></section><section><h2>Labels</h2><span>version=1.2.5</span></section>',
+  ])('rejects ambiguous Overview version evidence: %s', async (content) => {
+    const page = await context.newPage();
+    await page.setContent(`<main>${content}</main>`);
+    expect(await checkWorkloadVersion(page, '1.2.5')).toMatchObject({ status: 'AMBIGUOUS' });
+  });
+
+  it('executes Overview version checks and Logs scrolling through the actual tsx runtime used by the CLI', async () => {
     const script = `
       import { chromium } from 'playwright';
       import { readFileSync } from 'node:fs';
       import { parseConfig } from './src/config.ts';
-      import { prepareWorkloadPage } from './src/kiali.ts';
+      import { checkWorkloadVersion, prepareWorkloadPage } from './src/kiali.ts';
       const config = parseConfig(JSON.parse(readFileSync('config.json', 'utf8')), process.env.KIALI_BASE_URL);
       config.pageTimeoutMilliseconds = 4000;
       config.renderWaitMilliseconds = 80;
@@ -210,6 +306,9 @@ describe('real Chromium, loopback Kiali fixtures only', () => {
           const page = await context.newPage();
           await prepareWorkloadPage(page, config, {serviceName: 'good-app', namespace: 'test', workload: 'good-app'}, 'logs', 86400);
           console.log('TSX_LOG_CAPTURE_OK');
+          await page.setContent('<main><section><h2>Labels</h2><span>version=1.2.5</span></section></main>');
+          if ((await checkWorkloadVersion(page, '1.2.5')).status !== 'MATCHED') throw new Error('Overview version check failed');
+          console.log('TSX_VERSION_CHECK_OK');
         } finally { await context.close(); }
       } finally { await browser.close(); }
     `;
@@ -219,6 +318,7 @@ describe('real Chromium, loopback Kiali fixtures only', () => {
       timeout: 30000,
     });
     expect(output.stdout).toContain('TSX_LOG_CAPTURE_OK');
+    expect(output.stdout).toContain('TSX_VERSION_CHECK_OK');
   });
 
   it.each(['zero-height', 'sized'])('scrolls the inspected virtualized grid through a %s wrapper and waits for row rendering', async (layout) => {
@@ -648,6 +748,34 @@ describe('real Chromium, loopback Kiali fixtures only', () => {
     const image = PNG.sync.read(await readFile(result!.overviewScreenshotPath!));
     expect(image.height).toBe(1080);
     expect(result!.remarks.join(' ')).toContain('three viewport heights');
+  });
+
+  it('validates Excel expected versions through collection, report generation, and exit codes', async () => {
+    await writeFile(path.join(directory, 'config.json'), JSON.stringify({ ...config, authenticationMode: 'storageState' }));
+    await mkdir(path.join(directory, 'auth'));
+    await writeFile(path.join(directory, 'auth', 'kiali-session.json'), JSON.stringify({ cookies: [], origins: [] }));
+    const input = new ExcelJS.Workbook();
+    input.addWorksheet('Services').addRows([
+      ['Namespace', 'Service Name', 'Expected Version'],
+      ['test', 'version-mismatch', '1.2.5'],
+      ['test', 'good-app', '1.2.5'],
+    ]);
+    await input.xlsx.writeFile(path.join(directory, 'services.xlsx'));
+    const options = parseRunOptions(['node', 'tvt', '--release', 'Version-Validation', '--minutes', '30', '--keep-temp']);
+    const run = await runTvt(options, directory);
+    expect(run.exitCode).toBe(1);
+    expect(run.results[0]).toMatchObject({ expectedVersion: '1.2.5', deployedVersion: '1.2.4', versionStatus: 'MISMATCH', result: 'FAILED' });
+    expect(run.results[1]).toMatchObject({ expectedVersion: '1.2.5', deployedVersion: '1.2.5', versionStatus: 'MATCHED', result: 'PASS' });
+    expect((await verifyWorkbook(run.workbookPath, run.results)).imageCount).toBe(4);
+    const report = new ExcelJS.Workbook();
+    await report.xlsx.readFile(run.workbookPath);
+    expect(report.getWorksheet('version-mismatch')!.getCell('C12').value).toBe('1.2.4');
+    expect(report.getWorksheet('version-mismatch')!.getCell('C13').value).toBe('MISMATCH');
+    const selected = await runTvt({ ...options, service: 'good-app', keepTemp: false }, directory);
+    expect(selected.exitCode).toBe(0);
+    expect(selected.results).toHaveLength(1);
+    expect(selected.results[0]!.versionStatus).toBe('MATCHED');
+    await expect(readdir(selected.tempDirectory)).rejects.toThrow();
   });
 
   it('runs the full collector-to-workbook flow, returns failure status, and honors keep-temp', async () => {

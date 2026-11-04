@@ -15,5 +15,6 @@ temp/*
 !temp/.gitkeep
 *.log
 *.xlsx
+!/services.xlsx
 playwright-report/
 test-results/

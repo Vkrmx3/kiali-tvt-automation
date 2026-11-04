@@ -1,6 +1,6 @@
 import type { BrowserContext, JSHandle, Locator, Page, Request, Response } from 'playwright';
 import { AuthenticationError, TvtError, logDiagnosticUrl } from './logger.js';
-import type { AppConfig, Service } from './types.js';
+import type { AppConfig, Service, VersionCheck } from './types.js';
 
 export type KialiTab = 'info' | 'logs';
 
@@ -255,6 +255,50 @@ export async function assertWorkloadView(page: Page, config: AppConfig, service:
   if (!(await tabVisible(page, tab))) throw new TvtError('TAB_ABSENT', 'The requested workload tab is not selected or visible.');
   if (tab === 'logs' && !(await logsVisible(page))) throw new TvtError('LOGS_ABSENT', 'The logs area never loaded.');
   if (tab === 'logs') await assertLogPresentation(page);
+}
+
+export async function checkWorkloadVersion(page: Page, expectedVersion: string): Promise<VersionCheck> {
+  const snapshot = await page.locator('main, [role="main"]').getByText('Labels', { exact: true }).filter({ visible: true }).evaluateAll((headings) => {
+    const titleSelector = 'h1, h2, h3, h4, h5, h6, [role="heading"], [class*="card__title"]';
+    const excluded = '[hidden], [aria-hidden="true"], dialog, [role="dialog"], [role="tooltip"], nav';
+    const sections = new Set<Element>();
+    for (const heading of headings) {
+      if (!heading.closest(titleSelector) || heading.closest(excluded)) continue;
+      const section = heading.closest('section, article, [role="region"], .pf-c-card, .pf-v5-c-card, .pf-v6-c-card');
+      if (!section || Array.from(section.querySelectorAll(titleSelector)).some((title) =>
+        title.getClientRects().length > 0 && !title.closest(excluded) && title.textContent?.trim() !== 'Labels')) continue;
+      sections.add(section);
+    }
+    if (sections.size !== 1) return { sectionCount: sections.size, versions: [] as string[] };
+    const section = Array.from(sections)[0]!;
+    const versions = new Set<string>();
+    for (const element of Array.from(section.querySelectorAll('*'))) {
+      if (!(element instanceof HTMLElement) || element.closest(excluded) || element.getClientRects().length === 0 || getComputedStyle(element).visibility !== 'visible') continue;
+      const match = element.innerText.trim().match(/^version\s*=\s*(\S+)$/);
+      if (match?.[1] && match[1].length <= 1024 && !/[\x00-\x1f\x7f]/.test(match[1])) versions.add(match[1]);
+    }
+    return { sectionCount: sections.size, versions: Array.from(versions).sort() };
+  });
+  if (snapshot.sectionCount === 0 || snapshot.versions.length === 0 && snapshot.sectionCount === 1) {
+    return {
+      status: 'NOT FOUND', deployedVersion: undefined,
+      message: `Deployment version not verified: expected version=${expectedVersion}, but no visible version label was found in the Overview Labels section.`,
+    };
+  }
+  if (snapshot.sectionCount !== 1 || snapshot.versions.length !== 1) {
+    return {
+      status: 'AMBIGUOUS', deployedVersion: snapshot.versions.length ? snapshot.versions.join(', ') : undefined,
+      message: `Deployment version not verified: expected version=${expectedVersion}, but the Overview has multiple Labels sections or conflicting version labels.`,
+    };
+  }
+  const deployedVersion = snapshot.versions[0]!;
+  if (deployedVersion !== expectedVersion) {
+    return {
+      status: 'MISMATCH', deployedVersion,
+      message: `Deployment version mismatch: expected ${expectedVersion}; Overview Labels shows version=${deployedVersion}.`,
+    };
+  }
+  return { status: 'MATCHED', deployedVersion, message: undefined };
 }
 
 const sidecarName = /^(?:sidecar-proxy|istio-proxy|linkerd-proxy)$/i;
