@@ -116,7 +116,7 @@ function metadataRow(sheet: ExcelJS.Worksheet, row: number, label: string, value
   const valueCell = sheet.getCell(`C${row}`);
   valueCell.value = typeof value === 'string' ? safeExcelText(value) : value;
   valueCell.font = { name: 'Calibri', size: 11 };
-  valueCell.alignment = { vertical: 'top', wrapText: true };
+  valueCell.alignment = { horizontal: 'left', vertical: 'top', wrapText: true };
   sheet.getRow(row).height = Math.max(23, Math.ceil(String(value).length / 90) * 16);
 }
 

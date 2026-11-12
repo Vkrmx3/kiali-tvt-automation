@@ -24,7 +24,11 @@ describe('workbook integration (generated PNGs, no Kiali)', () => {
     expect(workbook.worksheets.map((sheet) => sheet.name)).toEqual(['Summary', 'sample-service', 'missing-logs']);
     const summary = workbook.worksheets[0]!;
     expect(summary.getCell('A1').text).toBe('Kiali Post-Release TVT Evidence');
-    expect(summary.getCell('C10').value).toBe(2);
+    for (const [index, count] of [2, 1, 0, 1].entries()) {
+      const countCell = summary.getCell(10 + index, 3);
+      expect(countCell.value).toBe(count);
+      expect(countCell.alignment).toMatchObject({ horizontal: 'left', vertical: 'top', wrapText: true });
+    }
     expect(summary.getCell(SUMMARY_HEADER_ROW + 1, 2).value).toEqual({ text: 'sample-service', hyperlink: sheetHyperlink('sample-service') });
     expect(summary.views[0]).toMatchObject({ state: 'frozen', ySplit: SUMMARY_HEADER_ROW, showGridLines: false });
     expect(summary.autoFilter).toBeTruthy();
