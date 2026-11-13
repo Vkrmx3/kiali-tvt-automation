@@ -3,5 +3,9 @@
     "*.xlsx": "spreadjs.designer",
     "*.xlsm": "spreadjs.designer"
   },
-  "spreadjs.ribbonMode": "classic"
+  "spreadjs.ribbonMode": "classic",
+  "files.exclude": {
+    ".gitignore": true,
+    ".vscode": true
+  }
 }

@@ -10,6 +10,12 @@ import { finishResult, resultCounts } from './results.js';
 import type { RunMetadata, ServiceResult, ResultStatus } from './types.js';
 
 export const SUMMARY_HEADER_ROW = 16;
+const SUMMARY_COLUMNS = [
+  { label: 'Namespace', width: 18 }, { label: 'Service Name', width: 38 }, { label: 'Result', width: 20 },
+  { label: 'Expected Version', width: 16 }, { label: 'Deployed Version', width: 16 }, { label: 'Version Check', width: 17 },
+  { label: 'Overview', width: 14 }, { label: 'Logs', width: 14 }, { label: 'Remarks', width: 45 },
+] as const;
+const SUMMARY_COLUMN = new Map(SUMMARY_COLUMNS.map((column, index) => [column.label, index + 1]));
 const ROW_PIXELS = 20;
 const TITLE_COLOR = '17365D';
 const STATUS_COLORS: Record<ResultStatus, string> = {
@@ -127,8 +133,8 @@ function versionColor(status: ServiceResult['versionStatus']): string {
 function buildSummary(workbook: ExcelJS.Workbook, metadata: RunMetadata, results: ServiceResult[]): void {
   const sheet = workbook.addWorksheet('Summary');
   styleSheet(sheet);
-  sheet.columns = [6, 44, 24, 48, 20, 20, 25, 80, 32, 24, 24, 22].map((width) => ({ width }));
-  band(sheet, 1, 'L', 'Kiali Post-Release TVT Evidence');
+  sheet.columns = SUMMARY_COLUMNS.map(({ width }) => ({ width }));
+  band(sheet, 1, 'I', 'Kiali Post-Release TVT Evidence');
   sheet.getRow(1).height = 36;
   const counts = resultCounts(results);
   const details: Array<[string, string | number]> = [
@@ -138,15 +144,15 @@ function buildSummary(workbook: ExcelJS.Workbook, metadata: RunMetadata, results
     ['Execution start time', formatSydneyTime(metadata.startedAt)],
     ['Execution completion time', formatSydneyTime(metadata.completedAt)],
     ['Requested log period', `${metadata.logsDurationSeconds / 60} minutes (${metadata.logsDurationSeconds} seconds)`],
-    ['Total enabled services', counts.total],
+    ['Total services', counts.total],
     ['Successful services', counts.successful],
     ['Services with warnings', counts.warnings],
     ['Failed services', counts.failed],
   ];
-  details.forEach(([label, value], index) => metadataRow(sheet, index + 4, label, value, 'L'));
+  details.forEach(([label, value], index) => metadataRow(sheet, index + 4, label, value, 'I'));
   const header = sheet.getRow(SUMMARY_HEADER_ROW);
-  header.values = ['No.', 'Service Name', 'Namespace', 'Workload', 'Overview', 'Logs', 'Result', 'Remarks', 'Captured At', 'Expected Version', 'Deployed Version', 'Version Check'];
-  header.height = 28;
+  header.values = SUMMARY_COLUMNS.map((column) => column.label);
+  header.height = 34;
   header.eachCell((cell) => {
     cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: TITLE_COLOR } };
     cell.font = { name: 'Calibri', bold: true, color: { argb: 'FFFFFF' } };
@@ -155,33 +161,32 @@ function buildSummary(workbook: ExcelJS.Workbook, metadata: RunMetadata, results
   results.forEach((result, index) => {
     const row = sheet.getRow(SUMMARY_HEADER_ROW + index + 1);
     row.values = [
-      index + 1,
+      safeExcelText(result.namespace),
       { text: safeExcelText(result.serviceName), hyperlink: sheetHyperlink(result.sheetName) },
-      safeExcelText(result.namespace), safeExcelText(result.workload),
-      result.overviewStatus, result.logsStatus, result.result,
-      safeExcelText(result.remarks.join(' ') || 'None'),
-      result.captureTimestamp ? formatSydneyTime(result.captureTimestamp) : 'Not captured',
+      result.result,
       safeExcelText(result.expectedVersion ?? 'Not supplied'),
       safeExcelText(result.deployedVersion ?? 'Not observed'),
       result.versionStatus,
+      result.overviewStatus, result.logsStatus,
+      safeExcelText(result.remarks.join(' ') || 'None'),
     ];
-    row.height = Math.max(36, Math.ceil(result.remarks.join(' ').length / 65) * 15, Math.ceil(result.serviceName.length / 35) * 15);
     row.eachCell((cell) => {
       cell.font = { name: 'Calibri', size: 11 };
       cell.alignment = { vertical: 'top', wrapText: true };
       cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: index % 2 ? 'F3F6FA' : 'FFFFFF' } };
       cell.border = { bottom: { style: 'hair', color: { argb: 'D9E2F3' } } };
     });
+    row.height = Math.min(409, Math.max(36, ...SUMMARY_COLUMNS.map((column, columnIndex) => Math.ceil(row.getCell(columnIndex + 1).text.length / (column.width - 2)) * 15)));
     row.getCell(2).font = { name: 'Calibri', color: { argb: '0563C1' }, underline: true };
-    row.getCell(7).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: STATUS_COLORS[result.result] } };
-    row.getCell(7).font = { name: 'Calibri', bold: true };
-    row.getCell(12).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: versionColor(result.versionStatus) } };
-    row.getCell(12).font = { name: 'Calibri', bold: true };
+    row.getCell(SUMMARY_COLUMN.get('Result')!).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: STATUS_COLORS[result.result] } };
+    row.getCell(SUMMARY_COLUMN.get('Result')!).font = { name: 'Calibri', bold: true };
+    row.getCell(SUMMARY_COLUMN.get('Version Check')!).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: versionColor(result.versionStatus) } };
+    row.getCell(SUMMARY_COLUMN.get('Version Check')!).font = { name: 'Calibri', bold: true };
   });
-  sheet.views = [{ state: 'frozen', ySplit: SUMMARY_HEADER_ROW, showGridLines: false }];
-  sheet.autoFilter = { from: { row: SUMMARY_HEADER_ROW, column: 1 }, to: { row: SUMMARY_HEADER_ROW + results.length, column: 12 } };
+  sheet.views = [{ state: 'frozen', xSplit: 2, ySplit: SUMMARY_HEADER_ROW, showGridLines: false }];
+  sheet.autoFilter = { from: { row: SUMMARY_HEADER_ROW, column: 1 }, to: { row: SUMMARY_HEADER_ROW + results.length, column: SUMMARY_COLUMNS.length } };
   sheet.pageSetup.printTitlesRow = `${SUMMARY_HEADER_ROW}:${SUMMARY_HEADER_ROW}`;
-  sheet.pageSetup.printArea = `A1:L${SUMMARY_HEADER_ROW + results.length}`;
+  sheet.pageSetup.printArea = `A1:I${SUMMARY_HEADER_ROW + results.length}`;
 }
 
 function imageSection(workbook: ExcelJS.Workbook, sheet: ExcelJS.Worksheet, row: number, title: string, image: EvidenceImage | undefined, missingText: string): number {
@@ -248,15 +253,27 @@ export async function verifyWorkbook(filePath: string, results: readonly Service
   if (summary.rowCount !== SUMMARY_HEADER_ROW + results.length) {
     throw new TvtError('WORKBOOK_VALIDATION', 'Workbook verification failed: Summary row count is incorrect.');
   }
+  if (SUMMARY_COLUMNS.some((column, index) => summary.getCell(SUMMARY_HEADER_ROW, index + 1).value !== column.label)) {
+    throw new TvtError('WORKBOOK_VALIDATION', 'Workbook verification failed: Summary headers are incorrect.');
+  }
+  const counts = resultCounts(results);
+  if ([counts.total, counts.successful, counts.warnings, counts.failed].some((count, index) => summary.getCell(10 + index, 3).value !== count)) {
+    throw new TvtError('WORKBOOK_VALIDATION', 'Workbook verification failed: Summary totals are incorrect.');
+  }
   let imageCount = 0;
   for (const [index, result] of results.entries()) {
     const sheet = reopened.getWorksheet(result.sheetName);
-    const value = summary.getCell(SUMMARY_HEADER_ROW + index + 1, 2).value;
+    const row = summary.getRow(SUMMARY_HEADER_ROW + index + 1);
+    const value = row.getCell(SUMMARY_COLUMN.get('Service Name')!).value;
     if (!sheet || !value || typeof value !== 'object' || !('hyperlink' in value) || value.hyperlink !== sheetHyperlink(result.sheetName) || value.text !== safeExcelText(result.serviceName)) {
       throw new TvtError('WORKBOOK_VALIDATION', 'Workbook verification failed: a service worksheet or internal Summary hyperlink is missing.');
     }
+    if (row.getCell(SUMMARY_COLUMN.get('Namespace')!).value !== safeExcelText(result.namespace) || row.getCell(SUMMARY_COLUMN.get('Result')!).value !== result.result) {
+      throw new TvtError('WORKBOOK_VALIDATION', 'Workbook verification failed: service identity or result is inconsistent.');
+    }
     const versionValues = [result.expectedVersion ?? 'Not supplied', result.deployedVersion ?? 'Not observed', result.versionStatus].map(safeExcelText);
-    if (versionValues.some((expected, offset) => summary.getCell(SUMMARY_HEADER_ROW + index + 1, 10 + offset).value !== expected || sheet.getCell(11 + offset, 3).value !== expected)) {
+    const versionColumns = ['Expected Version', 'Deployed Version', 'Version Check'] as const;
+    if (versionValues.some((expected, offset) => row.getCell(SUMMARY_COLUMN.get(versionColumns[offset]!)!).value !== expected || sheet.getCell(11 + offset, 3).value !== expected)) {
       throw new TvtError('WORKBOOK_VALIDATION', 'Workbook verification failed: deployment version validation results are missing or inconsistent.');
     }
     const expectedImages = [result.overviewScreenshotPath, result.logsScreenshotPath, result.errorScreenshotPath].filter(Boolean).length;
