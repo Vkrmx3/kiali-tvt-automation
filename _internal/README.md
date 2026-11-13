@@ -167,9 +167,10 @@ browser/OS certificate configuration.
 
 ### Launcher Setup and Environments
 
-[environments.json](environments.json) defines approved profiles. DEV uses the
-existing development endpoint, and PRD uses the production endpoint previously
-provided for this project. A maintainer must verify these targets inside VDI and
+[environments.json](environments.json) defines DEV, UAT, and PRD profiles. UAT uses
+the user-confirmed `https://kiali.uat.ausiex.com.au/kiali/console` endpoint and is
+marked non-production, like DEV. PRD retains its production confirmation.
+A maintainer must verify these targets inside VDI and
 add any other real environment URLs before distributing the workbook.
 
 Each profile has a unique `id`, display `label`, `kialiBaseUrl`, and explicit

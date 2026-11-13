@@ -7,6 +7,12 @@
       "production": false
     },
     {
+      "id": "UAT",
+      "label": "User Acceptance Testing",
+      "kialiBaseUrl": "https://kiali.uat.ausiex.com.au/kiali/console",
+      "production": false
+    },
+    {
       "id": "PRD",
       "label": "Production",
       "kialiBaseUrl": "https://kiali.prd.ausiex.com.au/kiali/console",
