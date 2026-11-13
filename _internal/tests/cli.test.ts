@@ -1,7 +1,8 @@
-import { mkdir, mkdtemp, rename, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import ExcelJS from 'exceljs';
 import { chromium, type Browser, type BrowserContext } from 'playwright';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -19,6 +20,14 @@ beforeEach(async () => { directory = await mkdtemp(path.join(os.tmpdir(), 'kiali
 afterEach(async () => { vi.restoreAllMocks(); await rm(directory, { recursive: true, force: true }); });
 
 describe('operator launcher', () => {
+  it('does not leave duplicate source folders in the operator root', async () => {
+    const root = projectDirectories(fileURLToPath(new URL('../', import.meta.url))).operatorDirectory;
+    const entries = await readdir(root);
+    for (const name of ['src', 'scripts', 'tests', 'node_modules', 'package.json']) {
+      expect(entries).not.toContain(name);
+    }
+  });
+
   it('resolves an internal application folder to the outer operator folder', () => {
     expect(projectDirectories(path.join(directory, '_internal'))).toEqual({
       applicationDirectory: path.join(directory, '_internal'), operatorDirectory: directory,
