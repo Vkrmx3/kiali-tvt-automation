@@ -1,0 +1,74 @@
+{
+  "projectType": "cli",
+  "generatedOnPlatform": "win32",
+  "setup": [],
+  "assertions": [
+    {
+      "name": "tsc-no-emit",
+      "kind": "process",
+      "command": "npm",
+      "args": ["run", "build"],
+      "verificationMethod": "exit-code",
+      "expected": "0",
+      "timeoutSeconds": 120
+    },
+    {
+      "name": "tests-pass",
+      "kind": "process",
+      "command": "npm",
+      "args": ["test", "--", "--reporter=verbose"],
+      "verificationMethod": "test-results",
+      "expected": "0",
+      "timeoutSeconds": 480
+    },
+    {
+      "name": "login-help",
+      "kind": "process",
+      "command": "npm",
+      "args": ["run", "login", "--", "--help"],
+      "verificationMethod": "exit-code",
+      "expected": "0",
+      "timeoutSeconds": 60
+    },
+    {
+      "name": "tvt-help",
+      "kind": "process",
+      "command": "npm",
+      "args": ["run", "tvt", "--", "--help"],
+      "verificationMethod": "exit-code",
+      "expected": "0",
+      "timeoutSeconds": 60
+    },
+    {
+      "name": "dedicated-edge-profile-round-trip",
+      "kind": "process",
+      "command": "node",
+      "args": [
+        "--import", "tsx", "--input-type=module", "-e",
+        "import assert from 'node:assert/strict'; import {mkdtemp,rm} from 'node:fs/promises'; import os from 'node:os'; import path from 'node:path'; import {readFileSync} from 'node:fs'; import {parseConfig} from './src/config.ts'; import {openBrowserSession} from './src/auth.ts'; import {safeErrorMessage} from './src/logger.ts'; const directory=await mkdtemp(path.join(os.tmpdir(),'kiali-edge-smoke-')); const config=parseConfig({...JSON.parse(readFileSync('config.json','utf8')),authenticationMode:'persistentProfile'},'http://127.0.0.1/kiali/console'); let session; try { session=await openBrowserSession(config,directory,{headless:true,readOnly:true}); await session.context.addCookies([{name:'local-fixture',value:'synthetic',url:'http://127.0.0.1',expires:Math.floor(Date.now()/1000)+3600}]); await session.close(); session=await openBrowserSession(config,directory,{headless:true,readOnly:true}); assert.equal((await session.context.cookies('http://127.0.0.1')).find(cookie=>cookie.name==='local-fixture')?.value,'synthetic'); console.log('PASS: dedicated Edge profile retained the loopback fixture cookie across launches; no Kiali navigation.'); } catch(error) { console.error(safeErrorMessage(error)); process.exitCode=1; } finally { await session?.close().catch(()=>undefined); await rm(directory,{recursive:true,force:true}); }"
+      ],
+      "verificationMethod": "exit-code",
+      "expected": "0",
+      "timeoutSeconds": 180
+    },
+    {
+      "name": "workbook-only-round-trip",
+      "kind": "process",
+      "command": "npm",
+      "args": ["run", "test:workbook"],
+      "verificationMethod": "exit-code",
+      "expected": "0",
+      "timeoutSeconds": 90
+    },
+    {
+      "name": "portable-setup-only",
+      "kind": "process",
+      "command": "node",
+      "args": ["setup.mjs", "--setup-only"],
+      "prependPath": ["runtime"],
+      "verificationMethod": "exit-code",
+      "expected": "0",
+      "timeoutSeconds": 60
+    }
+  ]
+}

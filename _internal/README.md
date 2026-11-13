@@ -61,13 +61,18 @@ node --import tsx scripts/package-operator.ts "D:\TVT-Releases\TVT-new-release"
 
 The builder refuses an existing destination. It compiles the application and
 copies the runtime dependencies selected by the lockfile; it does not install or
-download packages. Saved sessions, browser profiles, temporary evidence, old
+download npm packages. It also prepares a checksum-verified portable Node runtime
+from the pinned official release, reusing an already verified local runtime.
+Saved sessions, browser profiles, temporary evidence, old
 reports, tests, developer tools, and environment-variable files are not copied.
 The current input workbook is copied without changing any entered values.
 
 Copy the whole generated folder, including `_internal`, to the operator machine.
-Approved Node.js, the configured browser, and desktop Excel remain one-time
-prerequisites. Browser binaries and credentials are deliberately not bundled.
+Portable Node is included; no system Node/npm installation is required. Missing
+Playwright Chromium is prepared automatically on first use. Configurations that
+use corporate Microsoft Edge still require the approved Edge installation.
+Desktop Excel is needed only for automatically opening the finished report.
+Browser binaries and credentials are deliberately not bundled.
 The package uses compiled JavaScript, so operators do not need TypeScript, tsx,
 VS Code, or npm commands. Keep reports within approved local storage.
 
@@ -76,8 +81,8 @@ Inside a generated package, only the maintainer edits the configuration under
 Run Settings after a profile change:
 
 ```powershell
-node _internal/app/operator.js --data-directory . --prepare-input
-node _internal/app/operator.js --data-directory . --check-input
+_internal\runtime\node.exe _internal\app\operator.js --data-directory . --prepare-input
+_internal\runtime\node.exe _internal\app\operator.js --data-directory . --check-input
 ```
 
 These commands keep backups under `_internal/temp/`; normal run evidence and
@@ -87,18 +92,19 @@ The source workspace retains its developer CLI inside `_internal/`.
 
 ## Operator Quick Start
 
-After the maintainer completes the one-time installation, no commands or JSON
-editing are required for a normal TVT run:
+After receiving the complete folder, no installation commands or JSON editing
+are required for an operator run:
 
 1. Open [../services.xlsx](../services.xlsx). On **Run Settings**, choose the environment
   in **B3** and enter the release name in **B4**.
 2. On **Services**, update **Namespace**, **Service Name**, and **Expected Version**
   for every service to check. Save the workbook. Unsaved edits are not used.
 3. Double-click [../Run-TVT.cmd](../Run-TVT.cmd), or a desktop shortcut to it.
-4. Check the displayed environment, actual Kiali target, release, service count,
+4. Wait for automatic setup if this is the first run or required components are missing.
+5. Check the displayed environment, actual Kiali target, release, service count,
   and log period. Type `yes` for a non-production run or the displayed environment
   ID (for example `PRD`) for a production run. Enter without a value cancels.
-5. Complete corporate SSO/MFA in the browser if requested. TVT detects successful
+6. Complete corporate SSO/MFA in the browser if requested. TVT detects successful
   login and continues automatically. The verified report then opens in desktop Excel.
 
 All populated rows are included, even if hidden or filtered in Excel. The launcher
@@ -118,8 +124,9 @@ remains available. Keep all screenshots and reports within approved local storag
 
 ## Prerequisites
 
-- Node.js 22.13 or newer in the Node 22 or Node 24 release lines, with npm.
-- Playwright Chromium, installed separately as below.
+- A complete Windows x64 operator folder including the approved portable Node runtime.
+- Network access for missing downloads, with approved proxy and certificate settings.
+- Installed Microsoft Edge only when the configured mode uses a persistent Edge profile.
 - Access to the corporate network/VPN and the configured Kiali site.
 - A Kiali account allowed to view the required namespaces, workloads, and pod logs.
 - Sufficient local disk space for screenshots and the finished workbook.
@@ -130,13 +137,75 @@ Development and automated checks have been run on Windows with Node 22.13.1.
 The code uses platform-independent filesystem APIs. macOS and Linux have not
 been validated on this workstation.
 
-## Installation
+## Automatic First-Run Setup
+
+Every launch runs [setup.mjs](setup.mjs) using the bundled runtime before importing
+tsx or application dependencies. Ready runs make local checks only: no npm install,
+browser download, or browser smoke launch is repeated. First-time setup can take
+several minutes depending on network and machine speed.
+
+For source folders, missing or changed dependencies are installed reproducibly
+using the bundled npm CLI and the existing lockfile, including tsx. Compiled
+operator packages already contain their dependencies; setup never installs
+development packages into them. An incomplete compiled package is rejected.
+
+For storage-state mode, setup installs the exact locally installed Playwright
+version's Chromium when needed and verifies a local headless launch. It records
+the required headless-browser executable too. Persistent-profile mode checks
+existing Edge without downloading Chromium or changing the authentication mode.
+
+A per-installation setup lock stays held through TVT. Concurrent launches cannot
+reinstall a running application's dependencies. Setup failures or cancellation
+never proceed into TVT; a later double-click can retry. Install phases are limited
+to ten minutes, with visible progress. Raw installer output is not forwarded.
+Input workbooks, environment targets, auth data, existing reports, and global
+PATH/npm configuration are not rewritten. TLS verification remains enabled.
+
+### Portable Runtime Preparation
+
+[setup-manifest.json](setup-manifest.json) pins Node 22.23.4 Windows x64 from
+nodejs.org, with SHA-256 values for both the ZIP and node.exe. The builder verifies
+them before publishing the runtime. A bare Git checkout does not contain ignored
+runtime binaries; maintainers must prepare the complete folder before delivery.
+
+From `_internal/`, a maintainer with an existing Node installation can run:
+
+```powershell
+node setup.mjs --prepare-runtime
+```
+
+For an approved archive already downloaded through corporate tooling:
+
+```powershell
+node setup.mjs --prepare-runtime --runtime-archive "D:\Approved\node-v22.23.4-win-x64.zip"
+```
+
+The same pinned checksums are required for a local archive. Runtime binaries and
+machine-specific readiness files are Git-ignored. The root launcher prefers
+portable Node; if it is absent but a system Node is available, the launcher attempts
+runtime preparation automatically. With neither runtime present, it reports an
+incomplete delivery rather than asking operators to install Node.
+
+To prepare/check components without starting TVT, run from the outer TVT folder:
+
+```powershell
+.\Run-TVT.cmd --setup-only
+```
+
+The launcher supports relative and absolute command paths as well as double-clicking.
+Application files and the workbook are always resolved from the launcher's folder,
+not the terminal's starting directory.
+
+Office and corporate Edge installation remain under IT control. Setup does not
+bypass network restrictions, required administrator approval, or SSO/MFA.
+
+## Maintainer Installation
 
 These are one-time maintainer steps, not commands operators run for each TVT.
 Run commands from the `_internal/` directory:
 
 ```sh
-npm ci
+npm ci --include=dev
 npx playwright install chromium
 npm run build
 npm test
@@ -153,7 +222,7 @@ Some corporate machines block the `npm.ps1` and `npx.ps1` shims. Use the `.cmd`
 shims; changing execution policy is not necessary:
 
 ```powershell
-npm.cmd ci
+npm.cmd ci --include=dev
 npx.cmd playwright install chromium
 npm.cmd run build
 npm.cmd test
@@ -199,9 +268,9 @@ node --import tsx src/operator.ts --check-input
 
 Distribute the operator handover folder described above, not the source project.
 A shortcut can point to its launcher; it resolves paths from its own installation
-directory. It checks runtime/browser
-availability and output permissions instead of silently installing software or
-changing execution policies. Automatic Excel opening supports standard Office
+directory. It automatically prepares missing application/browser components before
+the existing runtime/browser and output-permission checks. It never changes execution
+policies or installs system-wide software. Automatic Excel opening supports standard Office
 installation paths; other installations can open the saved report manually.
 
 Launcher sessions live under `%LOCALAPPDATA%\Kiali-TVT\auth`, separated by environment,

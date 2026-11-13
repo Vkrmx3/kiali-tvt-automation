@@ -4,8 +4,9 @@ KIALI TVT - START HERE
 2. On Run Settings, choose the environment and enter the release name.
 3. On Services, enter Namespace, Service Name, and Expected Version for each service.
 4. Save the workbook, then double-click Run-TVT.cmd.
-5. Check the target and confirm. Complete SSO/MFA in the browser only when requested.
-6. Review the report that opens in Excel. Saved reports are in the output folder.
+5. On the first run, wait while missing components are prepared automatically.
+6. Check the target and confirm. Complete SSO/MFA in the browser only when requested.
+7. Review the report that opens in Excel. Saved reports are in the output folder.
 
 All populated service rows run, including hidden or filtered rows.
 Only saved workbook values are used. Press Enter without a confirmation to cancel.
@@ -16,4 +17,7 @@ Operators only need services.xlsx, Run-TVT.cmd, and output.
 Ask the maintainer about missing software, environment settings, or access errors.
 
 Maintainer documentation: _internal/README.md
-Node.js and the configured browser require one-time setup on the target machine.
+Portable Node.js is included in complete operator folders; no system Node install is needed.
+First-time downloads may take several minutes. Later runs reuse installed components.
+If setup fails, correct the displayed network/access issue and double-click Run-TVT.cmd again.
+Do not disable certificate checks or enter credentials into the setup window.

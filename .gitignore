@@ -17,6 +17,10 @@ temp/*
 !temp/.gitkeep
 _internal/temp/*
 !_internal/temp/.gitkeep
+_internal/runtime/
+_internal/.runtime-*/
+_internal/.setup-state.json
+_internal/.setup-state-*.tmp
 *.log
 *.xlsx
 !/services.xlsx

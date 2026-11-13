@@ -13,29 +13,6 @@ interface LockedPackage {
 
 const projectRoot = fileURLToPath(new URL('../', import.meta.url));
 
-const launcher = [
-  '@echo off',
-  'setlocal',
-  'cd /d "%~dp0_internal"',
-  'where node.exe >nul 2>nul',
-  'if errorlevel 1 (',
-  '  echo Node.js was not found. Ask the TVT maintainer to complete the one-time setup.',
-  '  pause',
-  '  exit /b 1',
-  ')',
-  'if not exist "%~dp0_internal\\app\\operator.js" (',
-  '  echo TVT application files are missing. Ask the maintainer to restore the complete folder.',
-  '  pause',
-  '  exit /b 1',
-  ')',
-  'node "%~dp0_internal\\app\\operator.js" --data-directory "%~dp0."',
-  'set "TVT_EXIT=%ERRORLEVEL%"',
-  'echo.',
-  'pause',
-  'exit /b %TVT_EXIT%',
-  '',
-].join('\r\n');
-
 const guide = [
   'KIALI TVT - START HERE',
   '',
@@ -53,7 +30,10 @@ const guide = [
   'Copy the whole TVT folder when moving the tool, including _internal.',
   'Saved login sessions remain private to your Windows account and are not included here.',
   '',
-  'A maintainer must install approved Node.js and the configured browser once on the target machine.',
+  'Portable Node.js is included. The first run prepares missing components automatically.',
+  'Setup downloads may take several minutes. Later runs reuse the installed components.',
+  'Internet access is needed for missing downloads; corporate certificate and access policies remain enabled.',
+  'If setup fails, correct the reported network/access issue and double-click Run-TVT.cmd again.',
   'Desktop Excel is used to open completed reports. If it cannot open, the report remains saved.',
   'Contact the maintainer for setup, missing-file, environment, or permission errors.',
   '',
@@ -132,13 +112,20 @@ export async function packageOperator(sourceDirectory = projectRoot, outputDirec
     }
     compileApplication(root, path.join(internal, 'app'));
     if (!await exists(path.join(internal, 'app', 'operator.js'))) throw new Error('The compiled operator entry point is missing.');
+    const setup = await import(new URL('../setup.mjs', import.meta.url).href);
+    const portable = await setup.prepareRuntime(root);
+    const setupManifest = await setup.readSetupManifest(root);
+    await cp(path.dirname(portable.nodePath), path.join(internal, 'runtime'), { recursive: true });
+    await copyFile(path.join(root, 'setup.mjs'), path.join(internal, 'setup.mjs'));
+    const dependencies = Object.fromEntries(Object.keys(manifest.dependencies ?? {}).map((name) => [name, lock.packages![`node_modules/${name}`]!.version]));
+    await writeFile(path.join(internal, 'setup-manifest.json'), JSON.stringify({ ...setupManifest, mode: 'compiled', dependencies }, null, 2) + '\n');
     await writeFile(path.join(internal, 'package.json'), JSON.stringify({
       name: `${manifest.name}-operator`, version: manifest.version, private: true, type: 'module', engines: manifest.engines,
     }, null, 2) + '\n');
     for (const file of ['config.json', 'environments.json', 'LICENSE']) await copyFile(path.join(root, file), path.join(internal, file));
     await copyFile(path.join(operatorDirectory, 'services.xlsx'), path.join(staged, 'services.xlsx'));
     await mkdir(path.join(staged, 'output'));
-    await writeFile(path.join(staged, 'Run-TVT.cmd'), launcher);
+    await copyFile(path.join(operatorDirectory, 'Run-TVT.cmd'), path.join(staged, 'Run-TVT.cmd'));
     await writeFile(path.join(staged, 'START-HERE.txt'), guide);
     if (await exists(destination)) throw new Error('The operator folder already exists. The new package was not published.');
     await rename(staged, destination);
@@ -153,7 +140,7 @@ async function main(): Promise<void> {
     if (process.argv.length > 3) throw new Error('Usage: node --import tsx scripts/package-operator.ts [new-output-directory]');
     const result = await packageOperator(projectRoot, process.argv[2] ? path.resolve(process.argv[2]) : path.join(projectRoot, 'dist', 'TVT'));
     console.log(`Operator folder: ${result.directory}`);
-    console.log(`Packaged ${result.runtimePackages} runtime dependencies. No saved sessions, screenshots, old reports, tests, or development tools were included.`);
+    console.log(`Packaged portable Node and ${result.runtimePackages} runtime dependencies. No saved sessions, screenshots, old reports, tests, or development tools were included.`);
   } catch (error) {
     console.error(error instanceof Error ? error.message : 'Operator packaging failed.');
     process.exitCode = 1;

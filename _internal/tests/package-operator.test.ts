@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -19,6 +20,16 @@ async function sourceProject(): Promise<string> {
       'node_modules/runtime-dep': { version: '1.0.0' },
       'node_modules/dev-only': { version: '1.0.0', dev: true },
     } }),
+    'setup-manifest.json': JSON.stringify({ schemaVersion: 1, mode: 'source', runtime: {
+      version: '22.23.4', platform: 'win32', arch: 'x64',
+      url: 'https://nodejs.org/dist/v22.23.4/node-v22.23.4-win-x64.zip',
+      sha256: '0'.repeat(64), executableSha256: createHash('sha256').update('fixture portable node').digest('hex'),
+    } }),
+    'setup.mjs': await readFile(new URL('../setup.mjs', import.meta.url), 'utf8'),
+    'Run-TVT.cmd': await readFile(new URL('../../Run-TVT.cmd', import.meta.url), 'utf8'),
+    'runtime/node.exe': 'fixture portable node',
+    'runtime/node_modules/npm/bin/npm-cli.js': 'fixture portable npm',
+    'runtime/LICENSE': 'fixture runtime license',
     'tsconfig.json': JSON.stringify({ compilerOptions: { target: 'ES2023', module: 'NodeNext', moduleResolution: 'NodeNext', strict: true, types: [], noEmit: true }, include: ['src/**/*.ts', 'tests/**/*.ts'] }),
     'src/operator.ts': 'import { value } from "runtime-dep"; console.log(value);',
     'tests/not-shipped.test.ts': 'const invalid: number = "Not an application source file";',
@@ -59,9 +70,16 @@ describe('operator distribution', () => {
       await expect(lstat(path.join(destination, '_internal', excluded))).rejects.toThrow();
     }
     const launcher = await readFile(path.join(destination, 'Run-TVT.cmd'), 'utf8');
-    expect(launcher).toContain('_internal\\app\\operator.js');
-    expect(launcher).toContain('--data-directory "%~dp0."');
+    expect(launcher).toContain('_internal\\runtime\\node.exe');
+    expect(launcher).toContain('_internal\\setup.mjs');
+    expect(launcher).toContain('set "TVT_ROOT=%~dp0"');
+    expect(launcher).toContain('--data-directory "%TVT_ROOT%."');
     expect(launcher).not.toContain('tsx');
+    expect(await readFile(path.join(destination, '_internal', 'runtime', 'node.exe'), 'utf8')).toBe('fixture portable node');
+    const setup = JSON.parse(await readFile(path.join(destination, '_internal', 'setup-manifest.json'), 'utf8'));
+    expect(setup.mode).toBe('compiled');
+    expect(setup.dependencies).toEqual({ 'runtime-dep': '1.0.0' });
+    await expect(lstat(path.join(destination, '_internal', '.setup-state.json'))).rejects.toThrow();
     const moved = path.join(directory, 'operator folder with spaces');
     await rename(destination, moved);
     const output = await promisify(execFile)(process.execPath, [path.join(moved, '_internal', 'app', 'operator.js')], { cwd: os.tmpdir() });
@@ -84,10 +102,11 @@ describe('operator distribution', () => {
     await mkdir(operatorDirectory);
     await rename(root, applicationDirectory);
     await rename(path.join(applicationDirectory, 'services.xlsx'), path.join(operatorDirectory, 'services.xlsx'));
+    await rename(path.join(applicationDirectory, 'Run-TVT.cmd'), path.join(operatorDirectory, 'Run-TVT.cmd'));
     const destination = path.join(applicationDirectory, 'dist', 'TVT');
     await packageOperator(applicationDirectory, destination);
     expect(await readFile(path.join(destination, 'services.xlsx'), 'utf8')).toBe('operator input bytes');
-    expect((await readdir(operatorDirectory)).sort()).toEqual(['_internal', 'services.xlsx']);
+    expect((await readdir(operatorDirectory)).sort()).toEqual(['Run-TVT.cmd', '_internal', 'services.xlsx']);
   });
 
   it('does not leave a partial package when a required runtime dependency is missing', async () => {
