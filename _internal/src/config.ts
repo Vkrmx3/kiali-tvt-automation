@@ -1,6 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import { TvtError } from './logger.js';
-import type { AppConfig } from './types.js';
+import type { AppConfig, EnvironmentProfile } from './types.js';
 
 function integerSetting(settings: Record<string, unknown>, key: string, minimum: number, maximum: number): number {
   const value = settings[key];
@@ -76,4 +76,53 @@ export function parseMinutes(value: string): number {
     throw new TvtError('ARGUMENT', 'Log period must be an integer between 1 and 1440 minutes.');
   }
   return Number(value);
+}
+
+export function parseReleaseName(value: unknown): string {
+  if (typeof value !== 'string' || !value.trim() || value.length > 200 || /[\x00-\x1f\x7f]/.test(value)) {
+    throw new TvtError('ARGUMENT', 'Release must be a non-empty, single-line label of at most 200 characters.');
+  }
+  return value;
+}
+
+export function parseEnvironmentProfiles(input: unknown): EnvironmentProfile[] {
+  const entries = input && typeof input === 'object' && 'environments' in input ? input.environments : undefined;
+  if (!Array.isArray(entries) || !entries.length) throw new TvtError('CONFIG', 'The environment file must contain a non-empty environments list.');
+  const ids = new Set<string>();
+  const targets = new Set<string>();
+  return entries.map((entry: unknown) => {
+    if (!entry || typeof entry !== 'object') throw new TvtError('CONFIG', 'Each environment must be a configured profile.');
+    const profile = entry as Record<string, unknown>;
+    if (typeof profile.id !== 'string' || !/^[a-z][a-z0-9_-]{0,31}$/i.test(profile.id)) {
+      throw new TvtError('CONFIG', 'Environment IDs must start with a letter and contain at most 32 letters, digits, underscores, or hyphens.');
+    }
+    if (typeof profile.label !== 'string' || !profile.label.trim() || profile.label.length > 200 || /[\x00-\x1f\x7f]/.test(profile.label) || typeof profile.production !== 'boolean') {
+      throw new TvtError('CONFIG', 'Each environment needs a non-empty display label and an explicit production true/false flag.');
+    }
+    const id = profile.id.toUpperCase();
+    const kialiBaseUrl = validateBaseUrl(profile.kialiBaseUrl);
+    if (ids.has(id) || targets.has(kialiBaseUrl)) throw new TvtError('CONFIG', 'Environment IDs and Kiali target URLs must be unique.');
+    ids.add(id);
+    targets.add(kialiBaseUrl);
+    return { id, label: profile.label.trim(), kialiBaseUrl, production: profile.production };
+  });
+}
+
+export function resolveEnvironment(defaults: unknown, profiles: readonly EnvironmentProfile[], environmentId: string): { profile: EnvironmentProfile; config: AppConfig } {
+  const profile = profiles.find((candidate) => candidate.id === environmentId.trim().toUpperCase());
+  if (!profile) throw new TvtError('CONFIG', 'The selected environment is not configured. Choose an approved environment in Run Settings.');
+  if (!defaults || typeof defaults !== 'object' || Array.isArray(defaults)) throw new TvtError('CONFIG', 'Application defaults must be a JSON object.');
+  return { profile, config: parseConfig({ ...defaults, environment: profile.label, kialiBaseUrl: profile.kialiBaseUrl }) };
+}
+
+export async function loadEnvironmentSelection(settingsPath: string, profilesPath: string, environmentId: string): Promise<{ profile: EnvironmentProfile; config: AppConfig }> {
+  let defaults: unknown;
+  let profiles: unknown;
+  try {
+    defaults = JSON.parse(await readFile(settingsPath, 'utf8'));
+    profiles = JSON.parse(await readFile(profilesPath, 'utf8'));
+  } catch {
+    throw new TvtError('CONFIG', 'Unable to read application defaults or environments.json. Ask the TVT maintainer to check the installation.');
+  }
+  return resolveEnvironment(defaults, parseEnvironmentProfiles(profiles), environmentId);
 }

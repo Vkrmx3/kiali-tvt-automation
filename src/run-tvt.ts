@@ -4,17 +4,28 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { Command, CommanderError } from 'commander';
 import { loadAuthentication, openBrowserSession, type BrowserSession } from './auth.js';
 import { collectServices } from './collect.js';
-import { loadConfig, parseMinutes } from './config.js';
+import { loadConfig, parseMinutes, parseReleaseName } from './config.js';
 import { enableReadOnlyRequests } from './kiali.js';
 import { TvtError, consoleText, safeErrorMessage } from './logger.js';
 import { createSheetNames } from './naming.js';
+import { projectDirectories } from './paths.js';
 import { createServiceResult, resultCounts } from './results.js';
 import { createRunTempDirectory } from './screenshots.js';
 import { loadServices } from './services.js';
 import { writeWorkbook } from './workbook.js';
-import type { RunOptions, ServiceResult } from './types.js';
+import type { AppConfig, RunOptions, Service, ServiceResult } from './types.js';
 
-const projectRoot = fileURLToPath(new URL('../', import.meta.url));
+const { applicationDirectory: projectRoot, operatorDirectory: operatorRoot } = projectDirectories(fileURLToPath(new URL('../', import.meta.url)));
+
+export interface PreparedTvtRun {
+  config: AppConfig;
+  services: readonly Service[];
+  authDirectory: string;
+  tempRoot: string;
+  outputDirectory: string;
+  signal?: AbortSignal;
+  report?: (index: number, total: number, message: string) => void;
+}
 
 export function parseRunOptions(argv: string[]): RunOptions {
   const command = new Command()
@@ -42,9 +53,7 @@ export function parseRunOptions(argv: string[]): RunOptions {
     release: string; minutes?: number; headed: boolean; service?: string;
     config: string; settings: string; keepTemp: boolean; overwrite: boolean;
   }>();
-  if (!options.release.trim() || options.release.length > 200 || /[\x00-\x1f\x7f]/.test(options.release)) {
-    throw new TvtError('ARGUMENT', 'Release must be a non-empty, single-line label of at most 200 characters.');
-  }
+  parseReleaseName(options.release);
   return {
     release: options.release,
     minutes: options.minutes,
@@ -57,14 +66,27 @@ export function parseRunOptions(argv: string[]): RunOptions {
   };
 }
 
-export async function runTvt(options: RunOptions, rootDirectory = projectRoot): Promise<{ workbookPath: string; results: ServiceResult[]; exitCode: number; tempDirectory: string }> {
-  const startedAt = new Date();
-  const config = await loadConfig(path.resolve(rootDirectory, options.settingsPath));
+export async function runTvt(options: RunOptions, rootDirectory = operatorRoot): Promise<{ workbookPath: string; results: ServiceResult[]; exitCode: number; tempDirectory: string }> {
+  const applicationDirectory = path.resolve(rootDirectory) === operatorRoot ? projectRoot : rootDirectory;
+  const config = await loadConfig(path.resolve(applicationDirectory, options.settingsPath));
   const services = await loadServices(path.resolve(rootDirectory, options.configPath), options.service);
-  const authDirectory = path.join(rootDirectory, 'auth');
+  return runPreparedTvt(options, {
+    config, services, authDirectory: path.join(applicationDirectory, 'auth'),
+    tempRoot: path.join(applicationDirectory, 'temp'), outputDirectory: path.join(rootDirectory, 'output'),
+  });
+}
+
+export async function runPreparedTvt(options: RunOptions, prepared: PreparedTvtRun): Promise<{ workbookPath: string; results: ServiceResult[]; exitCode: number; tempDirectory: string }> {
+  parseReleaseName(options.release);
+  if (prepared.signal?.aborted) throw new TvtError('INTERRUPTED', 'Run was interrupted.');
+  if (!prepared.services.length) throw new TvtError('EXCEL', 'No services were selected for this run.');
+  const startedAt = new Date();
+  const config = { ...prepared.config };
+  const services = prepared.services.map((service) => ({ ...service }));
+  const authDirectory = prepared.authDirectory;
   const state = await loadAuthentication(config, authDirectory);
   const logsDurationSeconds = options.minutes === undefined ? config.logsDurationSeconds : options.minutes * 60;
-  const tempDirectory = await createRunTempDirectory(path.join(rootDirectory, 'temp'), options.release);
+  const tempDirectory = await createRunTempDirectory(prepared.tempRoot, options.release);
   const controller = new AbortController();
   let session: BrowserSession | undefined;
   let results: ServiceResult[];
@@ -74,7 +96,10 @@ export async function runTvt(options: RunOptions, rootDirectory = projectRoot): 
   };
   process.once('SIGINT', interrupt);
   process.once('SIGTERM', interrupt);
+  prepared.signal?.addEventListener('abort', interrupt, { once: true });
   try {
+    if (prepared.signal?.aborted) interrupt();
+    if (controller.signal.aborted) throw new TvtError('INTERRUPTED', 'Run was interrupted.');
     session = await openBrowserSession(config, authDirectory, {
       headless: options.headed ? false : config.defaultHeadless,
       readOnly: true,
@@ -82,7 +107,7 @@ export async function runTvt(options: RunOptions, rootDirectory = projectRoot): 
     });
     if (controller.signal.aborted) throw new TvtError('INTERRUPTED', 'Run was interrupted.');
     await enableReadOnlyRequests(session.context);
-    results = await collectServices(session.context, services, config, tempDirectory, logsDurationSeconds, controller.signal);
+    results = await collectServices(session.context, services, config, tempDirectory, logsDurationSeconds, controller.signal, prepared.report);
   } catch (error) {
     const names = createSheetNames(services.map((service) => service.serviceName));
     results = services.map((service, index) => {
@@ -94,6 +119,7 @@ export async function runTvt(options: RunOptions, rootDirectory = projectRoot): 
     await session?.close().catch(() => undefined);
     process.off('SIGINT', interrupt);
     process.off('SIGTERM', interrupt);
+    prepared.signal?.removeEventListener('abort', interrupt);
   }
   const output = await writeWorkbook({
     release: options.release,
@@ -102,7 +128,7 @@ export async function runTvt(options: RunOptions, rootDirectory = projectRoot): 
     startedAt,
     completedAt: new Date(),
     logsDurationSeconds,
-  }, results, path.join(rootDirectory, 'output'), options.overwrite);
+  }, results, prepared.outputDirectory, options.overwrite);
   const counts = resultCounts(results);
   console.log('\nTVT collection completed.\n');
   console.log(`Release:         ${consoleText(options.release)}`);
@@ -118,7 +144,7 @@ export async function runTvt(options: RunOptions, rootDirectory = projectRoot): 
       console.warn('Workbook verified, but temporary screenshots could not be removed. Check local file permissions.');
     }
   }
-  return { workbookPath: output.path, results, exitCode: controller.signal.aborted ? 130 : counts.failed ? 1 : 0, tempDirectory };
+  return { workbookPath: output.path, results, exitCode: controller.signal.aborted || prepared.signal?.aborted ? 130 : counts.failed ? 1 : 0, tempDirectory };
 }
 
 async function main(): Promise<void> {

@@ -9,10 +9,14 @@ auth/*
 !auth/.gitkeep
 auth/kiali-session.json
 auth/kiali-edge-profile/
+_internal/auth/*
+!_internal/auth/.gitkeep
 output/*
 !output/.gitkeep
 temp/*
 !temp/.gitkeep
+_internal/temp/*
+!_internal/temp/.gitkeep
 *.log
 *.xlsx
 !/services.xlsx

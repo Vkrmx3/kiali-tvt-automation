@@ -1,5 +1,107 @@
 # Runtime Validation Report
 
+## Actual Root Reorganization (2026-11-13)
+
+The actual workspace root is now operator-facing: Run-TVT.cmd, services.xlsx,
+output/, START-HERE.txt, and _internal/. Git/editor housekeeping remains at the
+root and is excluded from the normal VS Code Explorer view. Implementation files
+were physically moved; this is not just a filtered view of the old source layout.
+
+Moved 18 internal items, including source, tests, scripts, dependencies, config,
+maintainer docs, generated packages, legacy auth, and temporary evidence. Verified
+26 source/test/script file hashes after moving. The input workbook hash was
+unchanged and the output folder was not moved or cleared. Nothing was committed,
+pushed, or reset.
+
+| Check | Status | Exit code | Evidence |
+| --- | --- | --- | --- |
+| Relocated launcher bootstrap | PASS | 0 | Actual tsx entry point loads from _internal; default data directory remains the outer root. |
+| Strict TypeScript validation | PASS | 0 | Compiler and project config both resolve under _internal. |
+| CLI, input, workbook, and packaging tests | PASS | 0 | 83 focused tests passed from the relocated test root. |
+| Browser-backed entry points | PASS | 0 | 5 focused tests passed: actual tsx, prepared run, operator flow, Excel version flow, and legacy CLI collection/report flow. |
+| Relocated private-state ignore rules | PASS | 0 | Auth/profile data, temporary evidence, node_modules, and generated packages remain ignored. |
+
+Shared directory resolution keeps configuration/auth/temp inside the application
+folder and the editable workbook/final reports outside. Packaging and the sample
+workbook script use the same rule. Maintainer npm/node commands now run from
+_internal, or use npm --prefix _internal from the outer root.
+
+These are focused relocation checks, not a new full-suite result. No production
+Kiali access, login, or desktop Excel launch occurred. Existing live-acceptance
+requirements remain unchanged. Earlier sections below retain historical paths
+as recorded at the time.
+
+## Operator Handover Package (2026-11-13)
+
+Generated an operator-only folder at `dist/TVT`. Its outer level contains the
+launcher, input workbook, empty output folder, short operator guide, and one
+required `_internal` folder. Development sources remain in the repository.
+
+| Check | Status | Exit code | Evidence |
+| --- | --- | --- | --- |
+| Packaging, CLI, and input regressions | PASS | 0 | 73 passed across tests/package-operator.test.ts, tests/cli.test.ts, and tests/services.test.ts. |
+| Strict TypeScript validation | PASS | 0 | All application, packaging-script, and test types checked with no emit. |
+| Actual operator package build | PASS | 0 | Application compiled; 199 installed runtime packages matched the lockfile. |
+| Relocated package validation | PASS | 0 | A temporary copy outside the repository, in a path containing spaces, ran its compiled help, fixture input validation, and settings preparation. |
+
+The relocated check disabled NODE_PATH and confirmed that no development checkout
+was needed. Its setup backup remained under `_internal/temp`; the top-level file
+list stayed unchanged. The real packaged workbook was compared byte-for-byte
+before and after the check and was not modified. Temporary fixture copies were removed.
+
+Packaging tests verify that auth state, temporary evidence, old reports, source
+tests, and environment-variable files are excluded, development-only dependencies
+are omitted, an existing destination is never overwritten, and failed builds do
+not leave a partial distribution. Runtime dependencies are copied, not installed
+or downloaded. Generated distribution files remain ignored by Git.
+
+This was focused packaging validation, not a rerun of the full browser suite.
+Collection, Logs, authentication logic, and evidence generation were unchanged.
+No corporate Kiali session or desktop Excel application was opened. Approved
+Node.js and the configured browser remain target-machine prerequisites; the
+existing manual VDI/SSO/desktop-Excel acceptance boundary still applies.
+
+## Excel-Driven Operator Launcher (2026-11-12)
+
+Implemented the approved Excel-input and double-click Windows workflow. The input
+now includes Run Settings with an environment dropdown and release name; all
+existing service rows and version values were preserved with a backup. Environment
+selection uses explicit DEV/PRD profiles, independent of the CLI URL override.
+
+| Check | Status | Exit code | Evidence |
+| --- | --- | --- | --- |
+| Strict TypeScript compilation | PASS | 0 | `node node_modules/typescript/bin/tsc --noEmit --pretty false` |
+| Complete regression suite | PASS | 0 | 212 passed, 0 failed, 0 skipped, across 7 test files; 90-second validation-only test limit. |
+| Real launcher entry point | PASS | 0 | `node --import tsx src/operator.ts --help` |
+| Actual input workbook preparation | PASS | 0 | `--prepare-input` plus read-back: Run Settings active, DEV/PRD dropdown, 3 service rows retained, text version column. |
+| End-to-end operator workflow | PASS | 0 | Local login, confirmed saved input, capture, version outcomes, verified output, and mocked report delivery. |
+
+Final evidence: [temp/operator-launcher-final-tests.json](temp/operator-launcher-final-tests.json).
+The first complete run passed 210 tests and timed out in two browser-related tests.
+Both passed unchanged when rerun alone. An intermediate rerun was interrupted by
+terminal tooling and was not counted. The final uninterrupted run passed all 212
+tests without changing assertions, application timeouts, or the test configuration.
+
+Added coverage includes profile/URL consistency, immutable workbook snapshots,
+missing settings, preserved input backups, environment-isolated auth directories,
+exclusive run locking, saved-session checks, automatic SSO completion detection,
+authentication timeouts, HTTP access errors, cancellation, missing prerequisites,
+unwritable output folders, verified report delivery, and Excel-opening fallback.
+The compact Summary retains count alignment, exact version values, links, and
+non-overlapping evidence, and verifies its headers, identities, and totals.
+
+Collection, Kiali selectors, screenshot safeguards, and the Logs implementation
+were not changed. No dependencies were added, and no commits or pushes were made.
+Environment endpoints were taken from the existing project settings and the
+user-provided production endpoint, not discovered through live requests.
+
+Local automated validation: PASS. No corporate SSO or Kiali access was attempted;
+the new Excel opener was mocked rather than opening desktop Excel during tests.
+A maintainer must verify the configured targets and perform one controlled VDI
+acceptance run before handing this workflow to operators, including successful
+SSO continuation, visible Run Settings/dropdown behavior, and desktop Excel opening.
+The Environment and Release Name cells are intentionally blank for operator input.
+
 ## Overview Version Validation (2026-11-04)
 
 Scope: per-service Expected Version input, read-only comparison against the exact

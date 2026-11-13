@@ -1,0 +1,19 @@
+KIALI TVT - START HERE
+
+1. Open services.xlsx.
+2. On Run Settings, choose the environment and enter the release name.
+3. On Services, enter Namespace, Service Name, and Expected Version for each service.
+4. Save the workbook, then double-click Run-TVT.cmd.
+5. Check the target and confirm. Complete SSO/MFA in the browser only when requested.
+6. Review the report that opens in Excel. Saved reports are in the output folder.
+
+All populated service rows run, including hidden or filtered rows.
+Only saved workbook values are used. Press Enter without a confirmation to cancel.
+Never enter passwords or MFA codes into the workbook or launcher.
+
+The _internal folder contains application and maintainer files. Leave it intact.
+Operators only need services.xlsx, Run-TVT.cmd, and output.
+Ask the maintainer about missing software, environment settings, or access errors.
+
+Maintainer documentation: _internal/README.md
+Node.js and the configured browser require one-time setup on the target machine.

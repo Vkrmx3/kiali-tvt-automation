@@ -24,6 +24,10 @@ describe('workbook integration (generated PNGs, no Kiali)', () => {
     expect(workbook.worksheets.map((sheet) => sheet.name)).toEqual(['Summary', 'sample-service', 'missing-logs']);
     const summary = workbook.worksheets[0]!;
     expect(summary.getCell('A1').text).toBe('Kiali Post-Release TVT Evidence');
+    expect(summary.getRow(SUMMARY_HEADER_ROW).values).toEqual([
+      undefined, 'Namespace', 'Service Name', 'Result', 'Expected Version', 'Deployed Version', 'Version Check', 'Overview', 'Logs', 'Remarks',
+    ]);
+    expect(summary.columns.reduce((total, column) => total + (column.width ?? 0), 0)).toBeLessThanOrEqual(225);
     for (const [index, count] of [2, 1, 0, 1].entries()) {
       const countCell = summary.getCell(10 + index, 3);
       expect(countCell.value).toBe(count);
@@ -72,15 +76,15 @@ describe('workbook integration (generated PNGs, no Kiali)', () => {
     const workbook = new ExcelJS.Workbook();
     await workbook.xlsx.readFile(output.path);
     const summary = workbook.getWorksheet('Summary')!;
-    expect([10, 11, 12].map((column) => summary.getCell(SUMMARY_HEADER_ROW, column).value)).toEqual(['Expected Version', 'Deployed Version', 'Version Check']);
+    expect([4, 5, 6].map((column) => summary.getCell(SUMMARY_HEADER_ROW, column).value)).toEqual(['Expected Version', 'Deployed Version', 'Version Check']);
     for (const [index, result] of results.entries()) {
       const expected = cases[index]!;
       const row = SUMMARY_HEADER_ROW + index + 1;
       expect(result.result).toBe(expected[2]);
-      expect(summary.getCell(row, 7).value).toBe(expected[2]);
-      expect(summary.getCell(row, 10).value).toBe('1.2.5');
-      expect(summary.getCell(row, 11).value).toBe(expected[1] ?? 'Not observed');
-      expect(summary.getCell(row, 12).value).toBe(expected[0]);
+      expect(summary.getCell(row, 3).value).toBe(expected[2]);
+      expect(summary.getCell(row, 4).value).toBe('1.2.5');
+      expect(summary.getCell(row, 5).value).toBe(expected[1] ?? 'Not observed');
+      expect(summary.getCell(row, 6).value).toBe(expected[0]);
       const sheet = workbook.getWorksheet(result.sheetName)!;
       expect(sheet.getCell('C11').value).toBe('1.2.5');
       expect(sheet.getCell('C12').value).toBe(expected[1] ?? 'Not observed');
@@ -88,7 +92,7 @@ describe('workbook integration (generated PNGs, no Kiali)', () => {
       expect(sheet.getImages()).toHaveLength(2);
       expect(sheet.getImages()[0]!.range.tl.nativeRow).toBeGreaterThan(15);
     }
-    summary.getCell(SUMMARY_HEADER_ROW + 1, 11).value = '9.9.9';
+    summary.getCell(SUMMARY_HEADER_ROW + 1, 5).value = '9.9.9';
     await workbook.xlsx.writeFile(output.path);
     await expect(verifyWorkbook(output.path, results)).rejects.toThrow('deployment version validation results are missing or inconsistent');
   });
@@ -120,7 +124,7 @@ describe('workbook integration (generated PNGs, no Kiali)', () => {
       const sheet = workbook.getWorksheet(result.sheetName)!;
       expect(sheet.getCell('C3').value).toBe(safeExcelText(result.serviceName));
       expect(sheet.getImages()).toHaveLength(0);
-      expect(workbook.worksheets[0]!.getCell(SUMMARY_HEADER_ROW + index + 1, 7).value).toBe('FAILED');
+      expect(workbook.worksheets[0]!.getCell(SUMMARY_HEADER_ROW + index + 1, 3).value).toBe('FAILED');
     });
     expect(output.verification.imageCount).toBe(0);
   });

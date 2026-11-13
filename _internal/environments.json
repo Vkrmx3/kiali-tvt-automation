@@ -1,0 +1,16 @@
+{
+  "environments": [
+    {
+      "id": "DEV",
+      "label": "Development",
+      "kialiBaseUrl": "https://kiali.dev.ausiex.com.au/kiali/console",
+      "production": false
+    },
+    {
+      "id": "PRD",
+      "label": "Production",
+      "kialiBaseUrl": "https://kiali.prd.ausiex.com.au/kiali/console",
+      "production": true
+    }
+  ]
+}

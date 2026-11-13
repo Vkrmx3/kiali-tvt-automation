@@ -1,9 +1,9 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import ExcelJS from 'exceljs';
 import { afterEach, describe, expect, it } from 'vitest';
-import { loadServices, parseServices } from '../src/services.js';
+import { loadOperatorInput, loadServices, parseServices, updateOperatorWorkbook } from '../src/services.js';
 
 const header = 'serviceName,namespace,workload,enabled\n';
 const directories: string[] = [];
@@ -21,6 +21,91 @@ async function serviceWorkbook(rows: ExcelJS.CellValue[][], sheetName = 'Service
   await workbook.xlsx.writeFile(filePath);
   return filePath;
 }
+
+describe('operator workbook', () => {
+  async function operatorWorkbook(environment: ExcelJS.CellValue = 'DEV', release: ExcelJS.CellValue = 'Release-123'): Promise<string> {
+    const filePath = await serviceWorkbook([
+      ['Namespace', 'Service Name', 'Expected Version'], ['test', 'app', '1.2.5'],
+    ]);
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.readFile(filePath);
+    const settings = workbook.addWorksheet('Run Settings');
+    settings.getCell('A3').value = 'Environment';
+    settings.getCell('B3').value = environment;
+    settings.getCell('A4').value = 'Release Name';
+    settings.getCell('B4').value = release;
+    await workbook.xlsx.writeFile(filePath);
+    return filePath;
+  }
+
+  it('reads settings and service values as an immutable snapshot without breaking CLI input', async () => {
+    const filePath = await operatorWorkbook(' prd ', ' Release-123 ');
+    const input = await loadOperatorInput(filePath);
+    expect(input).toEqual({
+      environmentId: 'PRD', release: 'Release-123',
+      services: [{ namespace: 'test', serviceName: 'app', workload: 'app', expectedVersion: '1.2.5' }],
+    });
+    expect(await loadServices(filePath)).toEqual(input.services);
+    expect(Object.isFrozen(input)).toBe(true);
+    expect(Object.isFrozen(input.services)).toBe(true);
+    expect(Object.isFrozen(input.services[0])).toBe(true);
+  });
+
+  it('updates the settings template without clearing release input or services and preserves a backup', async () => {
+    const filePath = await operatorWorkbook('PRD', 'Release-123');
+    const existing = new ExcelJS.Workbook();
+    await existing.xlsx.readFile(filePath);
+    existing.addWorksheet('Operator Notes').getCell('A1').value = 'Keep this note';
+    existing.views = [{ x: 0, y: 0, width: 18000, height: 12000, firstSheet: 1, activeTab: 1, visibility: 'visible' }];
+    await existing.xlsx.writeFile(filePath);
+    const original = await readFile(filePath);
+    const backupDirectory = path.join(path.dirname(filePath), '_internal', 'temp');
+    const backup = await updateOperatorWorkbook(filePath, [
+      { id: 'DEV', label: 'Development', production: false, kialiBaseUrl: 'https://dev.example.invalid' },
+      { id: 'PRD', label: 'Production', production: true, kialiBaseUrl: 'https://prd.example.invalid' },
+    ], backupDirectory);
+    expect(path.dirname(backup)).toBe(backupDirectory);
+    expect(await readFile(backup)).toEqual(original);
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.readFile(filePath);
+    const settings = workbook.getWorksheet('Run Settings')!;
+    expect(workbook.worksheets.map((sheet) => sheet.name)).toEqual(['Run Settings', 'Services', 'Operator Notes']);
+    expect(workbook.getWorksheet('Operator Notes')!.getCell('A1').value).toBe('Keep this note');
+    expect(settings.getCell('B3').value).toBe('PRD');
+    expect(settings.getCell('B4').value).toBe('Release-123');
+    expect(settings.getCell('B3').dataValidation.type).toBe('list');
+    expect(settings.getColumn(5).hidden).toBe(true);
+    expect(workbook.views[0]).toMatchObject({ firstSheet: 0, activeTab: 0 });
+    expect(workbook.getWorksheet('Services')!.getRow(2).values).toEqual([undefined, 'test', 'app', '1.2.5']);
+    expect((await loadOperatorInput(filePath)).services).toHaveLength(1);
+  });
+
+  it('adds missing Run Settings with blank values rather than guessing the environment or release', async () => {
+    const filePath = await serviceWorkbook([['Namespace', 'Service Name', 'Expected Version'], ['test', 'app', '1.2.5']]);
+    await updateOperatorWorkbook(filePath, [{ id: 'DEV', label: 'Development', production: false, kialiBaseUrl: 'https://dev.example.invalid' }]);
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.readFile(filePath);
+    expect(workbook.worksheets.map((sheet) => sheet.name)).toEqual(['Run Settings', 'Services']);
+    await expect(loadOperatorInput(filePath)).rejects.toThrow('Run Settings!B3');
+    expect(await loadServices(filePath)).toHaveLength(1);
+  });
+
+  it.each([
+    { environment: '', release: 'Release-123', message: 'Run Settings!B3' },
+    { environment: 'DEV', release: '', message: 'Run Settings!B4' },
+    { environment: 'DEV', release: { formula: '"release"', result: 'release' }, message: 'Run Settings!B4' },
+    { environment: 123, release: 'Release-123', message: 'Run Settings!B3' },
+    { environment: 'DEV', release: 'two\nlines', message: 'Release must be' },
+  ])('rejects invalid run settings: $message', async ({ environment, release, message }) => {
+    await expect(loadOperatorInput(await operatorWorkbook(environment, release))).rejects.toThrow(message);
+  });
+
+  it('requires the settings sheet for the launcher only', async () => {
+    const filePath = await serviceWorkbook([['Namespace', 'Service Name', 'Expected Version'], ['test', 'app', '1.2.5']]);
+    await expect(loadOperatorInput(filePath)).rejects.toThrow('Run Settings');
+    await expect(loadServices(filePath)).resolves.toHaveLength(1);
+  });
+});
 
 describe('CSV services', () => {
   it('trims values, ignores blanks, defaults enabled to true, and excludes disabled rows', () => {

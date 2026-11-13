@@ -1,11 +1,120 @@
 # kiali-tvt-automation
 
-A local, read-only TypeScript CLI for Kiali post-release evidence. It reads a
-three-column service list from [services.xlsx](services.xlsx), opens each workload
+A local, read-only Kiali post-release evidence tool with an Excel-driven Windows
+launcher and a TypeScript CLI. It reads a three-column service list from
+[../services.xlsx](../services.xlsx), opens each workload
 directly, checks its deployment version, captures Overview and Logs, and embeds the images in one output `.xlsx`
 workbook. Microsoft Excel is not required to run the utility or generate and
 verify the report. There is no web application, CI/CD integration,
 Python, Electron, or Kubernetes mutation client.
+
+## Folder Layout
+
+The actual project root is now operator-facing:
+
+```text
+kiali-tvt-automation/
+  Run-TVT.cmd
+  services.xlsx
+  output/
+  START-HERE.txt
+  _internal/
+```
+
+The operator edits the outer workbook, starts the outer launcher, and reviews
+reports in the outer `output/` folder. This README, source code, tests, scripts,
+dependencies, configuration, legacy input, and maintainer artifacts are under
+`_internal/`. Existing reports stayed outside; legacy sessions and temporary
+evidence were preserved inside. `_internal/` is required and must not be deleted.
+Git/editor metadata remains at the repository root and is hidden from the normal
+VS Code Explorer view. This separation is for usability, not access control.
+
+Maintainer commands below run from `_internal/` unless explicitly stated:
+
+```powershell
+Set-Location _internal
+```
+
+Alternatively, run an npm script from the outer folder using
+`npm.cmd --prefix _internal run build` or `npm.cmd --prefix _internal test`.
+
+## Operator Handover Package
+
+The root layout is already usable, but use a generated clean package when sharing
+with other operators so preserved sessions, evidence, and development artifacts
+are not distributed. The package has the same five outer items, with compiled
+runtime files rather than development files inside `_internal/`.
+
+A maintainer builds the package from the internal application directory:
+
+```powershell
+node --import tsx scripts/package-operator.ts
+```
+
+The default destination is `_internal/dist/TVT` relative to the project root,
+which is excluded from Git. To make a new
+release without replacing an earlier operator workbook or its reports:
+
+```powershell
+node --import tsx scripts/package-operator.ts "D:\TVT-Releases\TVT-new-release"
+```
+
+The builder refuses an existing destination. It compiles the application and
+copies the runtime dependencies selected by the lockfile; it does not install or
+download packages. Saved sessions, browser profiles, temporary evidence, old
+reports, tests, developer tools, and environment-variable files are not copied.
+The current input workbook is copied without changing any entered values.
+
+Copy the whole generated folder, including `_internal`, to the operator machine.
+Approved Node.js, the configured browser, and desktop Excel remain one-time
+prerequisites. Browser binaries and credentials are deliberately not bundled.
+The package uses compiled JavaScript, so operators do not need TypeScript, tsx,
+VS Code, or npm commands. Keep reports within approved local storage.
+
+Inside a generated package, only the maintainer edits the configuration under
+`_internal/`. From the generated package's outer folder, the maintainer can refresh
+Run Settings after a profile change:
+
+```powershell
+node _internal/app/operator.js --data-directory . --prepare-input
+node _internal/app/operator.js --data-directory . --check-input
+```
+
+These commands keep backups under `_internal/temp/`; normal run evidence and
+authentication continue to use per-user local application storage. A rebuild
+creates a separate folder so operators can retain existing input and reports.
+The source workspace retains its developer CLI inside `_internal/`.
+
+## Operator Quick Start
+
+After the maintainer completes the one-time installation, no commands or JSON
+editing are required for a normal TVT run:
+
+1. Open [../services.xlsx](../services.xlsx). On **Run Settings**, choose the environment
+  in **B3** and enter the release name in **B4**.
+2. On **Services**, update **Namespace**, **Service Name**, and **Expected Version**
+  for every service to check. Save the workbook. Unsaved edits are not used.
+3. Double-click [../Run-TVT.cmd](../Run-TVT.cmd), or a desktop shortcut to it.
+4. Check the displayed environment, actual Kiali target, release, service count,
+  and log period. Type `yes` for a non-production run or the displayed environment
+  ID (for example `PRD`) for a production run. Enter without a value cancels.
+5. Complete corporate SSO/MFA in the browser if requested. TVT detects successful
+  login and continues automatically. The verified report then opens in desktop Excel.
+
+All populated rows are included, even if hidden or filtered in Excel. The launcher
+uses one confirmed snapshot of the saved workbook; later edits do not alter a run
+already in progress. Missing inputs identify the worksheet cell or service row.
+An environment and release are deliberately not preselected in the template.
+
+Reports are stored beneath `output/<environment>/<release>-<unique-run-id>/`.
+Failures remain visible in the report; they do not prevent a valid report opening.
+If Excel is unavailable or cannot be launched, the report stays saved and the
+output folder is opened instead. Cancelling a run retains any completed partial
+report without automatically opening another application.
+
+Run Settings opens by default when supported by the spreadsheet editor. Operators
+can edit the workbook in desktop Excel; the existing VS Code spreadsheet editor
+remains available. Keep all screenshots and reports within approved local storage.
 
 ## Prerequisites
 
@@ -14,6 +123,8 @@ Python, Electron, or Kubernetes mutation client.
 - Access to the corporate network/VPN and the configured Kiali site.
 - A Kiali account allowed to view the required namespaces, workloads, and pod logs.
 - Sufficient local disk space for screenshots and the finished workbook.
+- Windows and installed desktop Microsoft Excel for the launcher's automatic
+  report-opening experience. Excel is not required to generate or verify reports.
 mentation
 Development and automated checks have been run on Windows with Node 22.13.1.
 The code uses platform-independent filesystem APIs. macOS and Linux have not
@@ -21,7 +132,8 @@ been validated on this workstation.
 
 ## Installation
 
-Run commands from the project directory:
+These are one-time maintainer steps, not commands operators run for each TVT.
+Run commands from the `_internal/` directory:
 
 ```sh
 npm ci
@@ -53,7 +165,56 @@ Install your approved corporate CA in the appropriate trust store. For Node
 downloads, IT may supply a PEM file for `NODE_EXTRA_CA_CERTS`; Chromium uses the
 browser/OS certificate configuration.
 
+### Launcher Setup and Environments
+
+[environments.json](environments.json) defines approved profiles. DEV uses the
+existing development endpoint, and PRD uses the production endpoint previously
+provided for this project. A maintainer must verify these targets inside VDI and
+add any other real environment URLs before distributing the workbook.
+
+Each profile has a unique `id`, display `label`, `kialiBaseUrl`, and explicit
+`production` flag. The launcher uses the profile's label and URL together and
+ignores `KIALI_BASE_URL` and the default environment/URL fields in
+[config.json](config.json). Other defaults, including the 24-hour log window,
+browser mode, viewport, and timeouts, still come from that file. The existing CLI
+continues to support its original configuration and environment-variable override.
+
+After changing profiles, close or save the input workbook and refresh its dropdown:
+
+```powershell
+node --import tsx src/operator.ts --prepare-input
+```
+
+This adds or refreshes Run Settings, preserves existing release/environment and
+service values, and saves a backup under `temp/`. It refuses to replace a workbook
+that changed during setup. Service cells remain editable; there are no macros or
+sheet locks preventing row changes. Normal runs never rewrite the input workbook.
+
+Validate saved inputs without opening Kiali or Excel:
+
+```powershell
+node --import tsx src/operator.ts --check-input
+```
+
+Distribute the operator handover folder described above, not the source project.
+A shortcut can point to its launcher; it resolves paths from its own installation
+directory. It checks runtime/browser
+availability and output permissions instead of silently installing software or
+changing execution policies. Automatic Excel opening supports standard Office
+installation paths; other installations can open the saved report manually.
+
+Launcher sessions live under `%LOCALAPPDATA%\Kiali-TVT\auth`, separated by environment,
+target URL, and authentication mode. They are not shared with the legacy CLI's
+repository-local auth folder. Keep this per-user directory private. A named-pipe
+lock prevents simultaneous launcher runs for the same Windows user and is released
+by Windows if the process exits unexpectedly; no stale lock file needs deleting.
+Do not run the profile from a different user or copy session data between environments.
+
 ## Initial Login
+
+This section describes the optional CLI. The launcher checks its saved session
+automatically and opens SSO only when needed, with a five-minute login window.
+A saved session file alone is not considered proof of a valid login.
 
 ```sh
 npm run login
@@ -108,7 +269,7 @@ After logging in, run only one service initially:
 npm.cmd run tvt -- --release "VDI-Startup-Check" --service "security-movement-out-v1" --minutes 1440 --headed --keep-temp
 ```
 
-Ensure that service is listed in [services.xlsx](services.xlsx) with its expected
+Ensure that service is listed in [../services.xlsx](../services.xlsx) with its expected
 release version filled in. Run this inside VDI; do not attempt
 production Kiali access from an outside machine.
 
@@ -125,7 +286,7 @@ full service list. A PASS means evidence was collected and any supplied expected
 version matched. It does not mean the service's health or log contents passed a
 business acceptance check.
 
-## Normal Execution
+## Command-Line Execution
 
 ```sh
 npm run tvt -- --release "Release-2026-10-09"
@@ -141,20 +302,24 @@ npm run tvt -- --release "Release-2026-10-09" --config "team-services.xlsx"
 | `--minutes <integer>` | Override the custom log window, from 1 through 1440 minutes. Defaults to the configured duration, now 1440 minutes (24 hours). |
 | `--headed` | Show the configured Chromium or Edge browser. Otherwise use `defaultHeadless`. |
 | `--service <name>` | Process one service by exact, case-sensitive `Service Name`. |
-| `--config <path>` | Service Excel workbook or legacy CSV, default [services.xlsx](services.xlsx). This is **not** the JSON settings path. |
+| `--config <path>` | Service Excel workbook or legacy CSV, default [../services.xlsx](../services.xlsx). This is **not** the JSON settings path. |
 | `--settings <path>` | Application settings JSON, default `config.json`. |
 | `--keep-temp` | Keep screenshots after workbook verification. |
 | `--overwrite` | Explicitly allow replacement of the original release workbook. |
 | `--help` | Display command help without launching a browser. |
 
-Relative TVT input paths resolve from the project root. Login settings resolve
-from the current directory, so run the documented commands from the project
-root. Absolute input paths are also supported. Auth, output, and temporary
-directories remain inside the project directory.
+Relative TVT input paths resolve from the outer project root. TVT settings resolve
+from `_internal/`; login settings resolve from the current directory, so run
+maintainer commands from `_internal/`. Absolute input paths are also supported.
+CLI auth and temporary evidence use `_internal/auth` and `_internal/temp`; finished
+reports use the outer `output/` folder. Launcher per-user storage is unchanged.
 
 ## Service List (Excel)
 
-Open [services.xlsx](services.xlsx) directly in VS Code using **SpreadJS XLSX Editor**
+The launcher's **Run Settings** sheet is separate from the **Services** sheet below.
+CLI commands can continue to read Services without requiring Run Settings.
+
+Open [../services.xlsx](../services.xlsx) directly in VS Code using **SpreadJS XLSX Editor**
 (`mescius.spreadjs-xlsx-editor`). This workspace recommends the extension and opens
 `.xlsx` and `.xlsm` files with its **SpreadJS Designer**. Install the recommended
 extension from VS Code's Extensions view if it is not already installed.
@@ -180,7 +345,7 @@ running. The version cells are initially blank, not inferred from a deployment.
 2. Enter the Kiali namespace first, then the exact service/workload name.
 3. Enter the expected release version as text, for example `1.2.5`.
 4. Remove a row, or clear all three cells, to leave that service out of future runs.
-5. Save your changes with **Ctrl+S** before running the usual TVT command.
+5. Save your changes with **Ctrl+S** before starting the launcher or a CLI run.
 
 To insert or delete rows, select their row numbers and use **Insert** or **Delete**
 from the right-click menu or the **Home** ribbon. Select column letters for the
@@ -226,7 +391,7 @@ but it is **not used by default**. Editing it does not change a normal Excel-bas
 run. To use it explicitly:
 
 ```sh
-npm run tvt -- --release "Release-2026-10-09" --config "services.csv"
+npm run tvt -- --release "Release-2026-10-09" --config "_internal/services.csv"
 ```
 
 Legacy CSV files retain their four-column format and behavior:
@@ -386,7 +551,8 @@ hidden, edited, or filtered out. The navigation is left intact.
 
 ## Output and Workbook Layout
 
-The normal output is:
+The launcher groups reports by environment and release in unique run directories.
+The optional CLI continues to use the original output location:
 
 ```text
 output/TVT-Release-2026-10-09.xlsx
@@ -400,9 +566,12 @@ the old workbook in Excel first. The absolute output path is always printed
 after successful workbook creation, even when service failures set exit code 1.
 
 The first worksheet is **Summary**, containing run metadata and a filterable,
-frozen-header table with No., Service Name, Namespace, Workload, Overview, Logs,
-Result, Remarks, Captured At, Expected Version, Deployed Version, and Version
-Check. Service names link to their worksheets.
+frozen-header table with Namespace, Service Name, Result, Expected Version,
+Deployed Version, Version Check, Overview, Logs, and Remarks. Namespace and Service
+Name remain frozen while scrolling. Service names link to their worksheets.
+Counts, including zero values, are left-aligned beside their labels and checked
+when the workbook is reopened. Duplicate workload names and individual capture
+timestamps remain on the detailed service sheets instead of widening the Summary.
 
 Results are `PASS`, `PASS WITH WARNING`, or `FAILED`, with green, orange, and
 light-red formatting. "Successful" counts PASS only; warnings are a separate,
@@ -432,6 +601,9 @@ hyperlinks, expected/deployed versions and check statuses, embedded PNG payloads
 absence of formulas, and a non-empty file.
 
 ## Temporary Evidence and Failures
+
+Launcher temporary evidence uses `%LOCALAPPDATA%\Kiali-TVT\temp`; it is removed
+only after workbook verification. The CLI continues to use the following paths:
 
 ```text
 temp/<safe-release>/<safe-service>/01-overview.png
@@ -483,6 +655,24 @@ the partial workbook can be completed. Pages, contexts, and browsers are closed
 in `finally` blocks. A forced OS termination cannot guarantee finalization.
 
 ## Session Expiry and Troubleshooting
+
+For launcher runs, complete SSO in the browser when prompted; no separate login
+command is needed. If a session expires during collection, the existing retry and
+stop safeguards apply. Review the failed report, then start a new run; previous
+reports are never overwritten or silently combined.
+
+| Launcher symptom | Operator action |
+| --- | --- |
+| Run Settings!B3 or B4 is required | Fill Environment and Release Name, save, and start again. |
+| Expected Version is missing | Fill the reported Services row with the intended release version as text. |
+| Selected environment is not configured | Choose an approved entry; ask the maintainer to refresh the environment list if needed. |
+| TVT is already running | Finish or close the other TVT launcher window first. |
+| Runtime, dependencies, or browser are missing | Ask the maintainer to complete installation; do not change execution policy. |
+| Login was not completed in time | Start again and finish SSO/MFA in the browser within five minutes. |
+| Report folder is not writable | Ask the maintainer to check local permissions and disk space. |
+| Report is saved but Excel did not open | Open it from the displayed output folder; no rerun is needed. |
+
+The following details apply primarily to the maintainer CLI:
 
 | Symptom | Action |
 | --- | --- |

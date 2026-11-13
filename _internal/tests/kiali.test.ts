@@ -11,10 +11,13 @@ import ExcelJS from 'exceljs';
 import { chromium, type Browser, type BrowserContext } from 'playwright';
 import { PNG } from 'pngjs';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { type openBrowserSession } from '../src/auth.js';
 import { collectServices } from '../src/collect.js';
 import { parseConfig } from '../src/config.js';
 import { assertAuthenticated, assertWorkloadView, checkWorkloadVersion, enableReadOnlyRequests, isAuthenticationPage, prepareWorkloadPage } from '../src/kiali.js';
-import { parseRunOptions, runTvt } from '../src/run-tvt.js';
+import { ensureOperatorAuthentication } from '../src/login.js';
+import { prepareOperatorRun, runOperator } from '../src/operator.js';
+import { parseRunOptions, runPreparedTvt, runTvt } from '../src/run-tvt.js';
 import { captureScreenshot } from '../src/screenshots.js';
 import { verifyWorkbook } from '../src/workbook.js';
 import type { AppConfig, RunOptions, ServiceResult } from '../src/types.js';
@@ -201,6 +204,63 @@ async function collect(names: string[]): Promise<ServiceResult[]> {
 }
 
 describe('real Chromium, loopback Kiali fixtures only', () => {
+  it.each(['missing', 'valid', 'expired'] as const)('operator authentication handles a %s saved session without a terminal login command', async (mode) => {
+    const authDirectory = path.join(directory, 'operator-auth');
+    if (mode !== 'missing') {
+      await mkdir(authDirectory);
+      await writeFile(path.join(authDirectory, 'kiali-session.json'), JSON.stringify({ cookies: [], origins: [] }));
+    }
+    const launches: boolean[] = [];
+    const opened: BrowserContext[] = [];
+    const openSession: typeof openBrowserSession = async (_settings, _directory, options) => {
+      launches.push(options.headless);
+      const isolated = await browser.newContext();
+      opened.push(isolated);
+      const page = await isolated.newPage();
+      await page.route('**/*', (route) => route.fulfill({ contentType: 'text/html', body: mode === 'expired' && options.headless
+        ? '<form id="login-form"><input type="password"></form>' : '<nav><a href="/kiali/console">Workloads</a></nav>' }));
+      return { context: isolated, close: () => isolated.close() };
+    };
+    await ensureOperatorAuthentication({ ...config, authenticationMode: 'storageState' }, authDirectory, { openSession, report: () => undefined, timeoutMilliseconds: 2000 });
+    expect(launches).toEqual(mode === 'valid' ? [true] : mode === 'expired' ? [true, false] : [false]);
+    expect(opened.every((isolated) => !browser.contexts().includes(isolated))).toBe(true);
+    expect(JSON.parse(await readFile(path.join(authDirectory, 'kiali-session.json'), 'utf8'))).toMatchObject({ cookies: [], origins: [] });
+  });
+
+  it('operator authentication does not treat HTTP access errors as an expired login', async () => {
+    await writeFile(path.join(directory, 'kiali-session.json'), JSON.stringify({ cookies: [], origins: [] }));
+    const launches: boolean[] = [];
+    const openSession: typeof openBrowserSession = async (_settings, _directory, options) => {
+      launches.push(options.headless);
+      const isolated = await browser.newContext();
+      const page = await isolated.newPage();
+      await page.route('**/*', (route) => route.fulfill({ status: 403, body: 'Access denied' }));
+      return { context: isolated, close: () => isolated.close() };
+    };
+    await expect(ensureOperatorAuthentication({ ...config, authenticationMode: 'storageState' }, directory, { openSession, report: () => undefined })).rejects.toThrow('HTTP 403');
+    expect(launches).toEqual([true]);
+  });
+
+  it('operator authentication times out safely and never saves an unconfirmed login', async () => {
+    const authDirectory = path.join(directory, 'operator-auth');
+    const openSession: typeof openBrowserSession = async () => {
+      const isolated = await browser.newContext();
+      const page = await isolated.newPage();
+      await page.route('**/*', (route) => route.fulfill({ contentType: 'text/html', body: '<form id="login-form"><input type="password"></form>' }));
+      return { context: isolated, close: () => isolated.close() };
+    };
+    await expect(ensureOperatorAuthentication({ ...config, authenticationMode: 'storageState' }, authDirectory, { openSession, report: () => undefined, timeoutMilliseconds: 300 })).rejects.toThrow('Login was not completed');
+    await expect(readFile(path.join(authDirectory, 'kiali-session.json'))).rejects.toThrow();
+  });
+
+  it('operator authentication honors cancellation before opening a browser', async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const openSession = vi.fn();
+    await expect(ensureOperatorAuthentication(config, directory, { signal: controller.signal, openSession })).rejects.toThrow('interrupted');
+    expect(openSession).not.toHaveBeenCalled();
+  });
+
   it.each([
     ['version-match', 'MATCHED', '1.2.5', 'PASS'],
     ['version-mismatch', 'MISMATCH', '1.2.4', 'FAILED'],
@@ -748,6 +808,63 @@ describe('real Chromium, loopback Kiali fixtures only', () => {
     const image = PNG.sync.read(await readFile(result!.overviewScreenshotPath!));
     expect(image.height).toBe(1080);
     expect(result!.remarks.join(' ')).toContain('three viewport heights');
+  });
+
+  it('runs the Excel operator launcher through local login, capture, verified output, and report delivery', async () => {
+    await writeFile(path.join(directory, 'config.json'), JSON.stringify({ ...config, authenticationMode: 'storageState' }));
+    await writeFile(path.join(directory, 'environments.json'), JSON.stringify({ environments: [
+      { id: 'DEV', label: 'Operator Fixture', kialiBaseUrl: config.kialiBaseUrl, production: false },
+    ] }));
+    const workbook = new ExcelJS.Workbook();
+    const settings = workbook.addWorksheet('Run Settings');
+    settings.getCell('B3').value = 'DEV';
+    settings.getCell('B4').value = 'Operator-Test';
+    workbook.addWorksheet('Services').addRows([
+      ['Namespace', 'Service Name', 'Expected Version'],
+      ['test', 'version-mismatch', '1.2.5'], ['test', 'good-app', '1.2.5'],
+    ]);
+    const inputPath = path.join(directory, 'services.xlsx');
+    await workbook.xlsx.writeFile(inputPath);
+    const inputBytes = await readFile(inputPath);
+    const prepared = await prepareOperatorRun(directory, path.join(directory, 'state'));
+    const openReport = vi.fn().mockResolvedValue(undefined);
+    const openSession: typeof openBrowserSession = async () => {
+      const isolated = await browser.newContext();
+      return { context: isolated, close: () => isolated.close() };
+    };
+    const result = await runOperator(prepared, {
+      confirm: async (summary) => summary.includes('Operator Fixture') && summary.includes('Services: 2'),
+      checkPrerequisites: async () => undefined,
+      authenticate: (settings, authDirectory, options) => ensureOperatorAuthentication(settings, authDirectory, { ...options, openSession, timeoutMilliseconds: 2000 }),
+      openReport, report: () => undefined,
+    });
+    expect(result!.exitCode).toBe(1);
+    expect(result!.results.map((service) => service.result)).toEqual(['FAILED', 'PASS']);
+    expect(path.dirname(result!.workbookPath)).toBe(prepared.outputDirectory);
+    expect((await verifyWorkbook(result!.workbookPath, result!.results)).imageCount).toBe(4);
+    expect(openReport).toHaveBeenCalledExactlyOnceWith(result!.workbookPath);
+    expect(await readFile(inputPath)).toEqual(inputBytes);
+    await expect(readdir(result!.tempDirectory)).rejects.toThrow();
+  });
+
+  it('executes a prepared run without rereading input files or inheriting a different environment', async () => {
+    const authDirectory = path.join(directory, 'isolated-auth');
+    await mkdir(authDirectory);
+    await writeFile(path.join(authDirectory, 'kiali-session.json'), JSON.stringify({ cookies: [], origins: [] }));
+    const options = parseRunOptions(['node', 'tvt', '--release', 'Prepared-Run', '--config', 'missing.xlsx', '--settings', 'missing.json']);
+    const services = Object.freeze([Object.freeze({ namespace: 'test', serviceName: 'good-app', workload: 'good-app', expectedVersion: '1.2.5' })]);
+    vi.stubEnv('KIALI_BASE_URL', 'https://must-not-be-used.example.invalid');
+    const run = await runPreparedTvt(options, {
+      config: { ...config, environment: 'Prepared Fixture', authenticationMode: 'storageState' }, services,
+      authDirectory, tempRoot: path.join(directory, 'temp'), outputDirectory: path.join(directory, 'reports'),
+      report: () => undefined,
+    });
+    expect(run.exitCode).toBe(0);
+    expect(run.results[0]).toMatchObject({ serviceName: 'good-app', versionStatus: 'MATCHED', result: 'PASS' });
+    expect(path.dirname(run.workbookPath)).toBe(path.join(directory, 'reports'));
+    const report = new ExcelJS.Workbook();
+    await report.xlsx.readFile(run.workbookPath);
+    expect(report.getWorksheet('Summary')!.getCell('C5').text).toBe('Prepared Fixture');
   });
 
   it('validates Excel expected versions through collection, report generation, and exit codes', async () => {

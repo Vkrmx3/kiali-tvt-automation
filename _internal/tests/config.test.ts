@@ -1,11 +1,43 @@
 import { readFileSync } from 'node:fs';
-import { describe, expect, it } from 'vitest';
-import { parseConfig, parseMinutes, validateBaseUrl } from '../src/config.js';
+import { describe, expect, it, vi } from 'vitest';
+import { parseConfig, parseEnvironmentProfiles, parseMinutes, resolveEnvironment, validateBaseUrl } from '../src/config.js';
 import { AuthenticationError, safeErrorMessage } from '../src/logger.js';
 
 const settings = JSON.parse(readFileSync(new URL('../config.json', import.meta.url), 'utf8')) as Record<string, unknown>;
 
 describe('configuration', () => {
+  it('resolves the selected environment without inheriting a stale URL override', () => {
+    const profiles = parseEnvironmentProfiles({ environments: [
+      { id: 'DEV', label: 'Development', kialiBaseUrl: 'https://dev.example.invalid/kiali/', production: false },
+      { id: 'PRD', label: 'Production', kialiBaseUrl: 'https://prd.example.invalid/kiali', production: true },
+    ] });
+    vi.stubEnv('KIALI_BASE_URL', 'https://unexpected.example.invalid/kiali');
+    try {
+      const selected = resolveEnvironment(settings, profiles, ' prd ');
+      expect(selected.profile.id).toBe('PRD');
+      expect(selected.profile.production).toBe(true);
+      expect(selected.config.environment).toBe('Production');
+      expect(selected.config.kialiBaseUrl).toBe('https://prd.example.invalid/kiali');
+      expect(selected.config.logsDurationSeconds).toBe(86400);
+      expect(() => resolveEnvironment(settings, profiles, 'unknown')).toThrow('not configured');
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it.each([
+    [],
+    [{ id: '../PRD', label: 'Production', kialiBaseUrl: 'https://prd.example.invalid', production: true }],
+    [{ id: 'PRD', label: 'Production', kialiBaseUrl: 'https://prd.example.invalid', production: 'true' }],
+    [{ id: 'PRD', label: '', kialiBaseUrl: 'https://prd.example.invalid', production: true }],
+    [
+      { id: 'DEV', label: 'Development', kialiBaseUrl: 'https://dev.example.invalid', production: false },
+      { id: 'dev', label: 'Other', kialiBaseUrl: 'https://other.example.invalid', production: false },
+    ],
+  ].map((environments) => ({ environments })))('rejects invalid or ambiguous environment profiles: %j', ({ environments }) => {
+    expect(() => parseEnvironmentProfiles({ environments })).toThrow();
+  });
+
   it('defaults to storage state and accepts the dedicated profile mode only when explicitly selected', () => {
     const withoutMode = { ...settings };
     delete withoutMode.authenticationMode;

@@ -19,6 +19,19 @@ export interface Service {
   expectedVersion?: string;
 }
 
+export interface EnvironmentProfile {
+  id: string;
+  label: string;
+  kialiBaseUrl: string;
+  production: boolean;
+}
+
+export interface OperatorInput {
+  readonly environmentId: string;
+  readonly release: string;
+  readonly services: readonly Service[];
+}
+
 export type CaptureStatus = 'CAPTURED' | 'FAILED' | 'NOT ATTEMPTED';
 export type ResultStatus = 'PASS' | 'PASS WITH WARNING' | 'FAILED';
 
